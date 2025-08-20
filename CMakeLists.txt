@@ -19,12 +19,27 @@ set(HAVE_CUDA ${CMAKE_CUDA_COMPILER} CACHE BOOL "True if we can compile .cu file
 
 option(USE_SUGGEST_LAYOUT "Use suggested layout instead of get_layout" ON)
 option(DEBUG_TENSOR_TYPE "Compile-time print cute tensor types (breaks build)" OFF)
+set(USE_CUBLASDX_VERSION "25.06" CACHE STRING "Version of cublasDx to use")
 
+
+# fetch cublasDx
+include(FetchContent)
+FetchContent_Declare(
+  cublasdx
+  URL https://developer.download.nvidia.com/compute/cublasdx/redist/cublasdx/nvidia-mathdx-${USE_CUBLASDX_VERSION}.0.tar.gz
+)
+FetchContent_MakeAvailable(cublasdx)
+FetchContent_GetProperties(cublasdx
+	SOURCE_DIR CUBLASDX_SOURCE_DIR
+	BINARY_DIR CUBLASDX_BINARY_DIR
+)
 
 # look for cublasDx
-find_package(mathdx REQUIRED COMPONENTS cublasdx)
+find_package(mathdx REQUIRED COMPONENTS cublasdx HINTS ${CUBLASDX_SOURCE_DIR}/nvidia/mathdx/25.06/)
 if (TARGET mathdx::cublasdx)
   message(STATUS "Found cublasDx at ${mathdx_CUBLASDX_DIR}")
+else()
+  message(FATAL_ERROR "cublasDx not found")
 endif()
 
 # Simple interface that holds cublasDx and CUDA settings
