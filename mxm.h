@@ -1,6 +1,8 @@
 #ifndef MRA_MXM_H
 #define MRA_MXM_H
 
+#include "util.h"
+
 typedef int32_t size_type;
 
 #if __has_include(<blas.hh>)

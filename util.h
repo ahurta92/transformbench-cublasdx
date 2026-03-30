@@ -76,7 +76,8 @@ typedef hipStream_t Stream;
   do {                                                                                  \
     static int smem_size_config = 0;                                                    \
     if (smem_size_config < shared) {                                                    \
-      hipFuncSetAttribute(name, hipFuncAttributeMaxDynamicSharedMemorySize, shared);  \
+      const void* func_ptr = reinterpret_cast<void*>(name);                             \
+      hipFuncSetAttribute(func_ptr, hipFuncAttributeMaxDynamicSharedMemorySize, shared);  \
       if (hipPeekAtLastError() != hipSuccess) {                                       \
         std::cout << "kernel configuration failed with " << shared << "B smem at "      \
                   << __FILE__ << ":" << __LINE__ << ": "                                \
@@ -94,12 +95,18 @@ typedef hipStream_t Stream;
 #define HAVE_DEVICE_ARCH 1
 #define SCOPE __device__ __host__
 #define SYNCTHREADS() __syncthreads()
-#elif defined(__HIP_DEVICE_COMPILE__)
-// TODO: Not sure how to throw in AMD kernels
-#define THROW(s) do { std::printf(s); } while(0)
-#define HAVE_DEVICE_ARCH 1
+#elif defined(__HIP__)
 #define SCOPE __device__ __host__ inline
-#define SYNCTHREADS() __syncthreads()
+// TODO: how to abort a kernel on AMD?
+#define THROW(s) do { std::printf(s); } while(0)
+#if defined(__HIP_DEVICE_COMPILE__)
+  #define SYNCTHREADS() __syncthreads()
+  #define SHARED __shared__
+  #define HAVE_DEVICE_ARCH 1
+#else
+  #define SYNCTHREADS()
+  #define SHARED
+#endif // __HIP_DEVICE_COMPILE__
 #else  // __CUDA_ARCH__
 #define THROW(s) do { throw std::runtime_error(s); } while(0)
 #define SCOPE inline
