@@ -3,6 +3,7 @@
 
 #include "util.h"
 #include "mxm_cublasdx.h"
+#include "mxm.h"
 
 /*****************************************
  * Regular transform function using mTxmq

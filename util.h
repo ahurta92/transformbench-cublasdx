@@ -16,7 +16,7 @@
 
 using Dim3 = dim3;
 
-tyedef Stream cudaStream_t;
+typedef Stream cudaStream_t;
 #define SYNC_STREAM(cudaStream) cudaStreamSynchronize(cudaStream)
 #define CREATE_STREAM(cudaStream) cudaStreamCreateWithFlags(&cudaStream, cudaStreamNonBlocking)
 
@@ -61,7 +61,7 @@ tyedef Stream cudaStream_t;
 
 using Dim3 = dim3;
 
-tyedef Stream hipStream_t;
+typedef Stream hipStream_t;
 #define SYNC_STREAM(hipStream) hipStreamSynchronize(hipStream)
 #define CREATE_STREAM(hipStream) hipStreamCreateWithFlags(&hipStream, hipStreamNonBlocking)
 

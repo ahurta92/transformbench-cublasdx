@@ -4,7 +4,9 @@
 #include "mra/misc/types.h"
 #include "mra/misc/platform.h"
 
-#include "mra/ops/mxm_cublasdx.h"
+typedef int32_t size_type;
+
+
 
 #if __has_include(<blas.hh>)
 #include <blas.hh>
