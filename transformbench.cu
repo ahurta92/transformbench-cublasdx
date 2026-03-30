@@ -26,7 +26,7 @@ void transform_bench(int nreps, int ntasks, int nfuncs, int nblocks, int K, bool
   for (int i = 0; i < nreps+1; ++i) {
     beg = std::chrono::high_resolution_clock::now();
     for (int t = 0; t < ntasks; ++t) {
-      if (!use_mTxm) {
+      if (!use_mTxm && MRA_HAVE_CUBLASDX) {
         submit_transform_cublasdx_bench<T>(nfuncs, nblocks, K, A, B, C, workspace, streams[t%4]);
       } else {
         submit_transform_bench(nfuncs, nblocks, K, A, B, C, workspace, streams[t%4]);

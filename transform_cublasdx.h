@@ -17,6 +17,8 @@
 
 #if __has_include(<cublasdx.hpp>)
 
+#define MRA_HAVE_CUBLASDX 1
+
 template <typename T, int K>
 __forceinline__ __device__
 void transform_cublasdx_k(
@@ -205,6 +207,8 @@ void submit_transform_cublasdx_bench(int nfuncs, int nblocks, int K,
 }
 
 #else
+
+#define MRA_HAVE_CUBLASDX 0
 
 template<typename T>
 void submit_transform_cublasdx_bench(int nfuncs, int nblocks, int K,
