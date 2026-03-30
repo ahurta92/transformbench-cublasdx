@@ -18,7 +18,7 @@ using Dim3 = dim3;
 
 typedef cudaStream_t Stream;
 #define SYNC_STREAM(cudaStream) cudaStreamSynchronize(cudaStream)
-#define CREATE_STREAM(cudaStream) cudaStreamCreateWithFlags(&cudaStream, cudaStreamNonBlocking)
+#define CREATE_STREAM(cudaStream) cudaStreamCreateWithFlags(cudaStream, cudaStreamNonBlocking)
 
 #define MALLOC(ptr, size) cudaMalloc(ptr, size)
 #define FREE(ptr) cudaFree(ptr)
@@ -56,7 +56,7 @@ using Dim3 = dim3;
 
 typedef hipStream_t Stream;
 #define SYNC_STREAM(hipStream) hipStreamSynchronize(hipStream)
-#define CREATE_STREAM(hipStream) hipStreamCreateWithFlags(&hipStream, hipStreamNonBlocking)
+#define CREATE_STREAM(hipStream) hipStreamCreateWithFlags(hipStream, hipStreamNonBlocking)
 
 #define MALLOC(ptr, size) hipMalloc(ptr, size)
 #define FREE(ptr) hipFree(ptr)
