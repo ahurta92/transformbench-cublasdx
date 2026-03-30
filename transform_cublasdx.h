@@ -209,8 +209,19 @@ void submit_transform_cublasdx_bench(int nfuncs, int nblocks, int K,
 template<typename T>
 void submit_transform_cublasdx_bench(int nfuncs, int nblocks, int K,
                                     const T* A, const T* B, T* C, T* workspace,
-                                    cudaStream_t stream) {
+                                    Stream stream) {
   std::printf("CUBLASdx not available, cannot run benchmark\n");
+}
+
+
+template <typename T, int K>
+constexpr auto transform_cublasdx_block_size() {
+  return 1;
+}
+
+template <typename T>
+int transform_cublasdx_shmem_size(int K) {
+  return 0;
 }
 
 #endif // __has_include(<cublasdx.hpp>)
