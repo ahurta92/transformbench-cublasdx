@@ -67,6 +67,12 @@ namespace mra {
     return 0;
   }
 
+  template<typename T>
+  constexpr Dim3 mTxm_blockdim(int K) {
+    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+  }
+
+
 #endif // MRA_HAVE_MTXM
 
 #ifndef MRA_HAVE_MTXMQ
@@ -84,6 +90,11 @@ namespace mra {
   template<typename T>
   constexpr size_type mTxmq_shmem_size(size_type K) {
     return 0;
+  }
+
+  template<typename T>
+  constexpr Dim3 mTxmq_blockdim(int K) {
+    return mTxm_blockdim<T>(K);
   }
 
 #endif // MRA_HAVE_MTXMQ
@@ -139,6 +150,12 @@ namespace mra {
   constexpr size_type mxm_shmem_size(size_type K) {
     return 0;
   }
+
+  template<typename T>
+  constexpr Dim3 mxm_blockdim(int K) {
+    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+  }
+
 #endif // MRA_HAVE_MXM
 
 
@@ -159,6 +176,12 @@ namespace mra {
   constexpr size_type mxmq_shmem_size(size_type K) {
     return 0;
   }
+
+  template<typename T>
+  constexpr Dim3 mxmq_blockdim(int K) {
+    return mxm_blockdim<T>(K);
+  }
+
 #endif // MRA_HAVE_MXMQ
 
 
@@ -220,6 +243,12 @@ namespace mra {
   constexpr size_type mxmT_shmem_size(size_type K) {
     return 0;
   }
+
+  template<typename T>
+  constexpr Dim3 mxmT_blockdim(int K) {
+    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+  }
+
 #endif // MRA_HAVE_MXMT
 
 
@@ -240,6 +269,12 @@ namespace mra {
   constexpr size_type mxmTq_shmem_size(size_type K) {
     return 0;
   }
+
+  template<typename T>
+  constexpr Dim3 mxmTq_blockdim(int K) {
+    return mxmT_blockdim<T>(K);
+  }
+
 
 #endif // MRA_HAVE_MXMTQ
 
@@ -302,6 +337,12 @@ namespace mra {
     return 0;
   }
 
+  template<typename T>
+  constexpr Dim3 mTxmT_blockdim(int K) {
+    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+  }
+
+
 #endif // MRA_HAVE_MTXMT
 
 
@@ -322,6 +363,11 @@ namespace mra {
   template<typename T>
   constexpr size_type mTxmTq_shmem_size(size_type K) {
     return 0;
+  }
+
+  template<typename T>
+  constexpr Dim3 mTxmTq_blockdim(int K) {
+    return mTxmT_blockdim<T>(K);
   }
 
 #endif // MRA_HAVE_MTXMTQ

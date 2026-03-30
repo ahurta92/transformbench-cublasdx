@@ -48,13 +48,6 @@ typedef cudaStream_t Stream;
     }                                                                                   \
   } while (0)
 
-
-#if defined(__CUDA_ARCH__)
-#define THROW(s) do { std::printf(s); __trap(); } while(0)
-#else  // __CUDA_ARCH__
-#define THROW(s) do { throw std::runtime_error(s); } while(0)
-#endif // __CUDA_ARCH__
-
 #elif defined(MRA_HAVE_HIP)
 
 #include <hip/hip_runtime.h>
@@ -93,19 +86,26 @@ typedef hipStream_t Stream;
     }                                                                                   \
   } while (0)
 
+#endif // MRA_HAVE_CUDA
+
 
 #if defined(__CUDA_ARCH__)
 #define THROW(s) do { std::printf(s); __trap(); } while(0)
 #define HAVE_DEVICE_ARCH 1
+#define SCOPE __device__ __host__
+#define SYNCTHREADS() __syncthreads()
 #elif defined(__HIP_DEVICE_COMPILE__)
 // TODO: Not sure how to throw in AMD kernels
 #define THROW(s) do { std::printf(s); } while(0)
 #define HAVE_DEVICE_ARCH 1
+#define SCOPE __device__ __host__ inline
+#define SYNCTHREADS() __syncthreads()
 #else  // __CUDA_ARCH__
 #define THROW(s) do { throw std::runtime_error(s); } while(0)
+#define SCOPE inline
+#define SYNCTHREADS()
 #endif // __CUDA_ARCH__
 
-#endif // MRA_HAVE_CUDA
 
 constexpr inline Dim3 max_thread_dims(int K) {
 //  int x = 32;
