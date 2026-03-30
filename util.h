@@ -95,8 +95,12 @@ tyedef Stream hipStream_t;
 
 
 #if defined(__CUDA_ARCH__)
+#define THROW(s) do { std::printf(s); __trap(); } while(0)
+#define HAVE_DEVICE_ARCH 1
+#elif defined(__HIP_DEVICE_COMPILE__)
 // TODO: Not sure how to throw in AMD kernels
 #define THROW(s) do { std::printf(s); } while(0)
+#define HAVE_DEVICE_ARCH 1
 #else  // __CUDA_ARCH__
 #define THROW(s) do { throw std::runtime_error(s); } while(0)
 #endif // __CUDA_ARCH__
