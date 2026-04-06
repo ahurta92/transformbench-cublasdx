@@ -3,6 +3,8 @@
 
 #include "util.h"
 
+#include "mxm_rocwmma.h"
+
 typedef int32_t size_type;
 
 #if __has_include(<blas.hh>)
