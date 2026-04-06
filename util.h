@@ -10,6 +10,8 @@
 
 #define LAUNCH_BOUNDS(__NT, __NB) __launch_bounds__(__NT, __NB)
 
+typedef int32_t size_type;
+
 
 #ifdef MRA_HAVE_CUDA
 #include <cuda_runtime.h>
