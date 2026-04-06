@@ -33,6 +33,9 @@
 
 #ifdef __HIP_DEVICE_COMPILE__
 
+
+namespace mra {
+
 namespace detail {
 
   // WMMA fragment tile size (M × N × K_TILE) on AMD hardware.
@@ -270,6 +273,8 @@ constexpr size_type mTxmq_rocwmma_nthreads(size_type K) {
   // (K² / 16) wavefronts × 64 threads/wavefront
   return static_cast<size_type>((K * K / 16) * 64);
 }
+
+} // namespace mra
 
 #define MRA_HAVE_MTXMQ 1
 
