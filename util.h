@@ -115,10 +115,10 @@ typedef hipStream_t Stream;
 
 
 constexpr inline Dim3 max_thread_dims(int K) {
-//  int x = 32;
-//  int y = MAX_THREADS_PER_BLOCK / x;
-  int x = MAX_THREADS_PER_BLOCK;
-  int y = 1;
+  int x = K;
+  int y = std::min(K, MAX_THREADS_PER_BLOCK / x);
+  //int x = MAX_THREADS_PER_BLOCK;
+  //int y = 1;
   int z = 1;
   return Dim3(x, y, z);
 }

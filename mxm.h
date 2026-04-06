@@ -66,7 +66,7 @@ namespace mra {
 
   template<typename T>
   constexpr Dim3 mTxm_blockdim(int K) {
-    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+    return max_thread_dims(K);
   }
 
 
@@ -150,7 +150,7 @@ namespace mra {
 
   template<typename T>
   constexpr Dim3 mxm_blockdim(int K) {
-    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+    return max_thread_dims(K);
   }
 
 #endif // MRA_HAVE_MXM
@@ -243,7 +243,7 @@ namespace mra {
 
   template<typename T>
   constexpr Dim3 mxmT_blockdim(int K) {
-    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+    return max_thread_dims(K);
   }
 
 #endif // MRA_HAVE_MXMT
@@ -336,7 +336,7 @@ namespace mra {
 
   template<typename T>
   constexpr Dim3 mTxmT_blockdim(int K) {
-    return Dim3(MAX_THREADS_PER_BLOCK, 1, 1);
+    return max_thread_dims(K);
   }
 
 
