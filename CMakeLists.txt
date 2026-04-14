@@ -2,8 +2,6 @@ cmake_minimum_required(VERSION 3.10)
 
 project(transformbench LANGUAGES CXX)
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
 set(CMAKE_CUDA_ARCHITECTURES 80)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -85,8 +83,10 @@ if (CMAKE_CUDA_COMPILER)
 endif()
 
 if (CMAKE_HIP_COMPILER)
-  find_package(hipblas REQUIRED HINTS /opt/rocm-6.4.3/lib/cmake/hipblas
-                                       /opt/rocm/lib/cmake/hipblas)
+  # Ensure ROCm cmake configs (hip, hipblas, etc.) are findable
+  list(APPEND CMAKE_PREFIX_PATH /opt/rocm-6.4.3 /opt/rocm)
+  find_package(hipblas REQUIRED)
+
   #target_link_libraries(libmra INTERFACE mathdx::cublasdx)
   # Set the CUDA architecture
   target_compile_definitions(libmra INTERFACE MRA_HAVE_HIP=1)
@@ -99,10 +99,9 @@ if (CMAKE_HIP_COMPILER)
   # Link against the MRA interface and hipBLAS (for level 6 Kronecker GEMM)
   target_link_libraries(transformbench_hip PUBLIC libmra roc::hipblas)
 
-
-  add_executable(test_kron test_kron.hip)
-  target_link_libraries(test_kron PUBLIC libmra roc::hipblas)
-  target_compile_definitions(test_kron PUBLIC USE_SUGGEST_LAYOUT)
+  # Correctness test: validate any optimization level against the L1 reference
+  add_executable(validate_levels validate_levels.hip)
+  target_link_libraries(validate_levels PUBLIC libmra roc::hipblas)
 
   if (USE_SUGGEST_LAYOUT)
       # Enable using suggested layout instead of get_layout

@@ -212,12 +212,38 @@ pipelining to overlap LDS reads and HMMA instructions.
 mkdir build && cd build
 
 # AMD (Frontier / MI250X)
-cmake .. -DMRA_HAVE_HIP=1 -DCMAKE_CXX_COMPILER=hipcc
+cmake .. \
+  -DMRA_HAVE_HIP=1 \
+  -DCMAKE_CXX_COMPILER=hipcc \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 make -j
 
 # NVIDIA (with cuBLASDx)
-cmake .. -DMRA_HAVE_CUDA=1 -DMRA_HAVE_CUBLASDX=1
+cmake .. \
+  -DMRA_HAVE_CUDA=1 \
+  -DMRA_HAVE_CUBLASDX=1 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 make -j
+```
+
+`CMAKE_EXPORT_COMPILE_COMMANDS=ON` writes `build/compile_commands.json`.
+Symlinking it to the project root enables clangd to resolve HIP/CUDA built-ins
+(`blockIdx`, `__global__`, etc.) in your editor:
+
+```bash
+ln -sf build/compile_commands.json compile_commands.json
+```
+
+> **ROCm note**: if CMake cannot find the HIP or hipBLAS config files, pass the
+> ROCm installation root via `-DCMAKE_PREFIX_PATH=/opt/rocm-6.4.3`.
+
+```bash
+cmake .. -DMRA_HAVE_HIP=1 -DCMAKE_CXX_COMPILER=hipcc \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_PREFIX_PATH=/opt/rocm-6.4.3 \
+         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 ```
 
 ---
@@ -251,6 +277,35 @@ Transform;level=L3-regblk;nfuncs=2048;nblocks=512;K=16;tasks=100;threads={128,1,
 
 ---
 
+## Validation
+
+`validate_levels` checks that any optimization level produces results that match
+the L1 reference to floating-point precision (max relative error < 10⁻¹⁰).
+
+```bash
+# Validate L3 (default) against L1, sweeping K = 4, 6, 8, 10
+./validate_levels
+
+# Validate a specific level
+./validate_levels -l 2          # L2
+./validate_levels -l 3          # L3
+./validate_levels -l 4          # L4
+./validate_levels -l 6          # L6 (Kronecker)
+
+# Validate a single K with a larger batch
+./validate_levels -l 6 -K 8 -N 64
+```
+
+Expected output:
+```
+K=4  nfuncs=16 level=3  max_abs_err=2.84e-14  max_rel_err=3.11e-14  PASS
+K=6  nfuncs=16 level=3  max_abs_err=5.68e-14  max_rel_err=4.22e-14  PASS
+K=8  nfuncs=16 level=3  max_abs_err=7.11e-14  max_rel_err=4.97e-14  PASS
+K=10 nfuncs=16 level=3  max_abs_err=8.53e-14  max_rel_err=5.68e-14  PASS
+```
+
+---
+
 ## File Map
 
 | File                    | Role                                              |
@@ -267,5 +322,5 @@ Transform;level=L3-regblk;nfuncs=2048;nblocks=512;K=16;tasks=100;threads={128,1,
 | `transform_cublasdx.h`  | L5 3D transform wrapper + kernel                  |
 | `transform_kron.h`      | L6 Kronecker GEMM (build kernel + hipBLAS call)   |
 | `transformbench.cu`     | Main benchmark driver (`-l` dispatch, timing)     |
-| `test_kron.hip`         | Correctness test: L6 vs L3 element-wise diff      |
+| `validate_levels.hip`   | Correctness test: any level vs L1 reference (`-l`)|
 | `util.h`                | Platform macros (CUDA/HIP), `CALL_KERNEL`, etc.   |
