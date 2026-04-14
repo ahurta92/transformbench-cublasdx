@@ -287,10 +287,12 @@ the L1 reference to floating-point precision (max relative error < 10⁻¹⁰).
 ./validate_levels
 
 # Validate a specific level
-./validate_levels -l 2          # L2
-./validate_levels -l 3          # L3
-./validate_levels -l 4          # L4
-./validate_levels -l 6          # L6 (Kronecker)
+./validate_levels -l 2          # L2: B in LDS
+./validate_levels -l 3          # L3: register blocking
+./validate_levels -l 4          # L4: AMD MFMA
+./validate_levels -l 5          # L5: rocWMMA transform3d (HIP) / cuBLASDx (CUDA)
+./validate_levels -l 6          # L6: Kronecker GEMM (hipBLAS)
+./validate_levels -l 7          # L7: rocWMMA variant (HIP only)
 
 # Validate a single K with a larger batch
 ./validate_levels -l 6 -K 8 -N 64
