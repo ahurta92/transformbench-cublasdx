@@ -28,11 +28,13 @@ typedef cudaStream_t Stream;
 #define CALL_KERNEL(name, block, thread, shared, stream, args)                          \
   do {                                                                                  \
     name<<<block, thread, shared, stream>>> args ;                                      \
-    if (cudaPeekAtLastError() != cudaSuccess) {                                         \
-      std::cout << "kernel submission failed with " << shared << "B smem at "           \
-                << __FILE__ << ":" << __LINE__ << ": "                                  \
-                << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;              \
-      throw std::runtime_error("kernel configuration failed");                          \
+    { auto _err = cudaGetLastError();                                                   \
+      if (_err != cudaSuccess) {                                                        \
+        std::cout << "kernel submission failed with " << shared << "B smem at "         \
+                  << __FILE__ << ":" << __LINE__ << ": "                               \
+                  << cudaGetErrorString(_err) << std::endl;                            \
+        throw std::runtime_error("kernel configuration failed");                        \
+      }                                                                                 \
     }                                                                                   \
   } while (0)
 
@@ -41,11 +43,14 @@ typedef cudaStream_t Stream;
     static int smem_size_config = 0;                                                    \
     if (smem_size_config < shared) {                                                    \
       cudaFuncSetAttribute(name, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);  \
-      if (cudaPeekAtLastError() != cudaSuccess) {                                       \
-        std::cout << "kernel configuration failed with " << shared << "B smem at "      \
-                  << __FILE__ << ":" << __LINE__ << ": "                                \
-                  << cudaGetErrorString(cudaPeekAtLastError()) << std::endl;            \
-        throw std::runtime_error("kernel configuration failed");                        \
+      { auto _err = cudaGetLastError();                                                 \
+        if (_err != cudaSuccess) {                                                      \
+          std::cout << "kernel configuration failed with " << shared << "B smem at "    \
+                    << __FILE__ << ":" << __LINE__ << ": "                             \
+                    << cudaGetErrorString(_err) << std::endl;                          \
+          throw std::runtime_error("kernel configuration failed");                      \
+        }                                                                               \
+        smem_size_config = shared;                                                      \
       }                                                                                 \
     }                                                                                   \
   } while (0)
@@ -66,11 +71,13 @@ typedef hipStream_t Stream;
 #define CALL_KERNEL(name, block, thread, shared, stream, args)                          \
   do {                                                                                  \
     name<<<block, thread, shared, stream>>> args ;                                      \
-    if (hipPeekAtLastError() != hipSuccess) {                                         \
-      std::cout << "kernel submission failed with " << shared << "B smem at "           \
-                << __FILE__ << ":" << __LINE__ << ": "                                  \
-                << hipGetErrorString(hipPeekAtLastError()) << std::endl;              \
-      throw std::runtime_error("kernel configuration failed");                          \
+    { auto _err = hipGetLastError();                                                    \
+      if (_err != hipSuccess) {                                                         \
+        std::cout << "kernel submission failed with " << shared << "B smem at "         \
+                  << __FILE__ << ":" << __LINE__ << ": "                               \
+                  << hipGetErrorString(_err) << std::endl;                             \
+        throw std::runtime_error("kernel configuration failed");                        \
+      }                                                                                 \
     }                                                                                   \
   } while (0)
 
@@ -80,11 +87,14 @@ typedef hipStream_t Stream;
     if (smem_size_config < shared) {                                                    \
       const void* func_ptr = reinterpret_cast<void*>(name);                             \
       (void)hipFuncSetAttribute(func_ptr, hipFuncAttributeMaxDynamicSharedMemorySize, shared);  \
-      if (hipPeekAtLastError() != hipSuccess) {                                       \
-        std::cout << "kernel configuration failed with " << shared << "B smem at "      \
-                  << __FILE__ << ":" << __LINE__ << ": "                                \
-                  << hipGetErrorString(hipPeekAtLastError()) << std::endl;            \
-        throw std::runtime_error("kernel configuration failed");                        \
+      { auto _err = hipGetLastError();                                                  \
+        if (_err != hipSuccess) {                                                       \
+          std::cout << "kernel configuration failed with " << shared << "B smem at "    \
+                    << __FILE__ << ":" << __LINE__ << ": "                             \
+                    << hipGetErrorString(_err) << std::endl;                           \
+          throw std::runtime_error("kernel configuration failed");                      \
+        }                                                                               \
+        smem_size_config = shared;                                                      \
       }                                                                                 \
     }                                                                                   \
   } while (0)
