@@ -242,7 +242,6 @@ ln -sf build/compile_commands.json compile_commands.json
 ```bash
 cmake .. -DMRA_HAVE_HIP=1 -DCMAKE_CXX_COMPILER=hipcc \
          -DCMAKE_BUILD_TYPE=Release \
-         -DCMAKE_PREFIX_PATH=/opt/rocm-6.4.3 \
          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 ```
 

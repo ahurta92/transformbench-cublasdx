@@ -13,7 +13,7 @@
 
 
 /**
- * T'is the version for HIP! Hop!
+ * L1: B read from global memory each pass (no LDS staging).
  */
 
 template <typename T>
@@ -26,12 +26,9 @@ __device__ void transform(
 {
   constexpr const int ndim = 3; // fixed for benchmark
 
-  extern __shared__ T b_shm[];
-
-  for (int i = thread_id(); i < K*K; i += block_size()) b_shm[i] = b[i];
-  const T* pc = b_shm;
+  /* L1: B stays in global memory — pc points directly to device B */
+  const T* pc = b;
   T *t0=workspace, *t1=c;
-  //std::swap(t0,t1);
     auto tmp = t0;
     t0 = t1;
     t1 = tmp;
@@ -43,7 +40,6 @@ __device__ void transform(
     auto tmp = t0;
     t0 = t1;
     t1 = tmp;
-    //std::swap(t0,t1);
   }
   /* no need to synchronize here, mTxmq synchronizes */
 }
@@ -113,11 +109,8 @@ inline void submit_transform_bench(int nfuncs, int nblocks, int K,
 {
   Dim3 thread_dims = mra::mTxmq_blockdim<T>(K);
   assert(block_size(thread_dims) <= MAX_THREADS_PER_BLOCK);
-  auto smem_size = mra::mTxmq_shmem_size<T>(K);
-  size_type K2 = K*K;
-  if (smem_size < K2*sizeof(T)) {
-    smem_size = K2*sizeof(T);
-  }
+  /* L1: no LDS used — smem = 0 */
+  size_type smem_size = 0;
   CONFIGURE_KERNEL(transform_kernel<T>, smem_size);
   CALL_KERNEL(transform_kernel<T>, std::min(nfuncs, nblocks), thread_dims, smem_size, stream, (nfuncs, K, A, B, C, workspace));
 }

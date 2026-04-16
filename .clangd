@@ -1,7 +1,11 @@
 CompileFlags:
   # compile_commands.json already has all flags; nothing to add/remove
   Remove:
-    - -O3      # clangd doesn't need optimization; speeds up indexing
+    - -O3               # clangd doesn't need optimization; speeds up indexing
+    - --offload-arch=*  # offload flags confuse clangd's host-side indexer
+  Add:
+    - -x
+    - hip               # ensure .hip files are parsed as HIP (C++)
 
 Index:
   Background: Build
@@ -10,3 +14,4 @@ Diagnostics:
   Suppress:
     - pp_including_mainfile_in_preamble
     - unknown_builtin
+    - err_implicit_function_declaration  # HIP device builtins not visible to host parser

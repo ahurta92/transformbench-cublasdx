@@ -24,3 +24,7 @@ target_link_libraries(transformbench_hip PUBLIC libmra)
 # Correctness test: GPU L1 vs CPU reference (mirrors transform3d.cc)
 add_executable(validate validate.hip)
 target_link_libraries(validate PUBLIC libmra)
+
+# Multi-level correctness test (-l selects level, -K and -N override defaults)
+add_executable(validate_levels validate_levels.hip)
+target_link_libraries(validate_levels PUBLIC libmra)
