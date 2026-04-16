@@ -1,11 +1,12 @@
 CompileFlags:
-  # compile_commands.json already has all flags; nothing to add/remove
   Remove:
     - -O3               # clangd doesn't need optimization; speeds up indexing
     - --offload-arch=*  # offload flags confuse clangd's host-side indexer
   Add:
     - -x
-    - hip               # ensure .hip files are parsed as HIP (C++)
+    - hip               # ensure .hip/.h files are parsed as HIP (C++)
+    - -DMRA_HAVE_HIP=1
+    - -I/opt/rocm-7.2.2/include
 
 Index:
   Background: Build
