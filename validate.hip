@@ -61,14 +61,14 @@ static void cpu_transform3d(int K, const double* A, const double* B, double* res
 //
 //   Pass 1 (contract i'):   local.   blk_s <- B^T . blk_s        -> [a, j']
 //   Pass 2 (contract j'):   local.   blk_s <- blk_s . B          -> [a, b]
-//   Pass 3 (contract k'):   requires an all-to-all "corner turn" where block t
-//                           pulls row a=t from every block so it ends up holding
-//                           temp2[a=t, b, k'=*].  Then local:
-//                                     blk_t <- B^T . blk_t       -> [c, b]
+//   Pass 3 (contract k'):   all-to-all "corner turn" where block t pulls row
+//                           a=t from every other block, storing into the
+//                           (b, k') layout.  Then local right-multiply:
+//                                     blk_t <- blk_t . B         -> [b, c]
 //
-// After pass 3, the block index is 'a' (it was k') and the per-block storage is
-// (c, b) instead of canonical (b, c), so the un-shuffle is a K x K transpose
-// inside each block when writing out.
+// Applying B on the right in pass 3 makes the output land in canonical (b, c)
+// order directly; the in-block transpose is absorbed into the corner turn for
+// free (same number of loads/stores, different destination cell).
 // ---------------------------------------------------------------------------
 
 static void print_blocks(const char* label, int K,
@@ -119,35 +119,35 @@ static void cpu_transform3d_blocked(int K, const double* A, const double* B,
     }
     if (trace) print_blocks("after pass 2 (block_s[a,b], fixed k'=s)", K, blk);
 
-    // Corner turn: block t pulls row a=t from every block.
+    // Corner turn: block t pulls row a=t from every block, stored as (b, k').
     // Before: blk[s][a, b]    (block-index = k' = s)
-    // After : blk[t][k, b]    (block-index = a = t)
+    // After : blk[t][b, k]    (block-index = a = t)
     {
         std::vector<std::vector<double>> exch(K, std::vector<double>(K2));
         for (int t = 0; t < K; ++t)
-            for (int k = 0; k < K; ++k)
-                for (int b = 0; b < K; ++b)
-                    exch[t][k*K + b] = blk[k][t*K + b];
-        blk = std::move(exch);
-    }
-    if (trace) print_blocks("after corner turn (block_t[k,b], fixed a=t)", K, blk);
-
-    // Pass 3: contract k'.  blk_t <- B^T . blk_t       -> indexed [c, b]
-    for (int t = 0; t < K; ++t) {
-        std::vector<double> r(K2, 0.0);
-        for (int c = 0; c < K; ++c)
             for (int b = 0; b < K; ++b)
                 for (int k = 0; k < K; ++k)
-                    r[c*K + b] += B[k*K + c] * blk[t][k*K + b];
+                    exch[t][b*K + k] = blk[k][t*K + b];
+        blk = std::move(exch);
+    }
+    if (trace) print_blocks("after corner turn (block_t[b,k], fixed a=t)", K, blk);
+
+    // Pass 3: contract k'.  blk_t <- blk_t . B         -> indexed [b, c]
+    for (int t = 0; t < K; ++t) {
+        std::vector<double> r(K2, 0.0);
+        for (int b = 0; b < K; ++b)
+            for (int c = 0; c < K; ++c)
+                for (int k = 0; k < K; ++k)
+                    r[b*K + c] += blk[t][b*K + k] * B[k*K + c];
         blk[t] = std::move(r);
     }
-    if (trace) print_blocks("after pass 3 (block_t[c,b] = result[t,b,c])", K, blk);
+    if (trace) print_blocks("after pass 3 (block_t[b,c] = result[t,b,c])", K, blk);
 
-    // Un-shuffle per block: stored (c, b), canonical wants (b, c).
+    // Canonical write-out: block_a holds result[a, :, :] in (b, c) order.
     for (int a = 0; a < K; ++a)
         for (int b = 0; b < K; ++b)
             for (int c = 0; c < K; ++c)
-                out[a*K2 + b*K + c] = blk[a][c*K + b];
+                out[a*K2 + b*K + c] = blk[a][b*K + c];
 }
 
 // K=2 walkthrough with the counting tensor A[i,j,k] = 100i + 10j + k and B = I.

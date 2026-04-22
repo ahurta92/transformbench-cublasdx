@@ -4,7 +4,8 @@ A data-movement-conscious restructuring of the MRA 3D transform, designed so
 each of K thread-block-equivalents ("wavefronts" on AMD) owns one K×K slab of
 the tensor throughout the computation. Passes 1 and 2 are fully local per
 block; pass 3 requires a single all-to-all "corner turn" that transposes the
-block-level ownership from `k'` to `a`.
+block-level ownership from `k'` to `a`. Pass 3 right-multiplies by B so the
+output lands in canonical (b, c) order with no post-transpose.
 
 Reference implementations
 - CPU (C++): `validate.hip` → `cpu_transform3d_blocked`
@@ -96,11 +97,14 @@ rows flowing between them.
 `a` is the within-block row index.
 
 **After** (bottom): K blocks, each entirely one color. Block 0 all red,
-block 1 all green, block 2 all blue. `a` is now the **block** index and
-`k'` has become the within-block row.
+block 1 all green, block 2 all blue. `a` is now the **block** index.
+**Each arriving row is stored as a column**, so within each block the row
+index is `b` and the column index is `k'`. This orientation sets pass 3
+up to right-multiply by B and land in canonical order directly.
 
 The operation is a **block-level transpose of a K×K super-matrix** whose
-cells are K-vectors indexed by `b`.
+cells are K-vectors indexed by `b`, with an in-block transpose rolled into
+the receive address (free — same data movement, different destination cell).
 
 Callout on the frame: *"block-level transpose: block index ↔ within-block
 row."* This is the single sentence the audience should leave with.
@@ -111,20 +115,24 @@ shows the full K=2 picture with all four arrows.
 
 ---
 
-## Frame 5 — pass 3 + un-shuffle
+## Frame 5 — pass 3 (no un-shuffle needed)
 
 > ![Frame 5](frames/frame5_pass3.png)
 
 ```
-row of K squares  ──(× B^T on left)──►  row of K squares  ──(in-block ᵀ)──►  canonical result
- rows: k',  cols: b                      rows: c,   cols: b                   rows: b,  cols: c
+row of K squares  ──(× B on right)──►  canonical result
+ rows: b,  cols: k'                     rows: b,   cols: c
 ```
 
 Points to emphasize:
 
 - Block index throughout this frame is `a` (inherited from the corner turn).
-- The final transpose is **inside each K×K block only** — no inter-block
-  traffic. On GPU this fuses into the pass-3 store.
+- **Right-multiply by B contracts `k'` → `c` in the column slot**, so the
+  output is already in canonical (b, c) order. No per-block transpose on
+  store — it was absorbed into the corner turn.
+- Passes 2 and 3 now share the same GEMM orientation (B on the right);
+  only pass 1 is the odd one out. One fewer MFMA microkernel variant to
+  maintain on GPU.
 
 ---
 
@@ -134,17 +142,16 @@ Points to emphasize:
 
 | stage              | block idx | within-block row | within-block col |
 |--------------------|-----------|------------------|------------------|
-| distribute         | k'        | i'                | j'               |
-| after pass 1       | k'        | **a**             | j'               |
-| after pass 2       | k'        | a                 | **b**            |
-| after corner turn  | **a**     | **k'**            | b                |
-| after pass 3       | a         | **c**             | b                |
-| after un-shuffle   | a         | **b**             | **c**            |
+| distribute         | k'        | i'               | j'               |
+| after pass 1       | k'        | **a**            | j'               |
+| after pass 2       | k'        | a                | **b**            |
+| after corner turn  | **a**     | **b**            | **k'**           |
+| after pass 3       | a         | b                | **c**            |
 
 Bold cells mark which slot changed on each row. Two annotations:
 
-- Rows 1–3 and 5: *"local GEMM: row slot updates."*
-- Row 4: *"corner turn: block slot ↔ row slot."*
+- Rows 1–2 (pass 1) and row 5 (pass 3): *"local GEMM: one slot updates."*
+- Row 4: *"corner turn: block slot ↔ row slot, and row ↔ col inside the block."*
 
 ---
 
@@ -154,7 +161,7 @@ Bold cells mark which slot changed on each row. Two annotations:
 |--------------------------------------|---------------------------------------|
 | compute (mathematical minimum)       | 3 · 2 · K⁴ FLOPs                      |
 | HBM reads of A                       | K³ doubles (once, at distribute)      |
-| HBM writes of result                 | K³ doubles (once, at un-shuffle)      |
+| HBM writes of result                 | K³ doubles (once, at pass-3 store)    |
 | HBM reads of B                       | K² doubles (once, cached in LDS)      |
 | inter-wave exchange (corner turn)    | K³ doubles (via LDS, one pass only)   |
 
