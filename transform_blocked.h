@@ -82,27 +82,32 @@ void transform_kernel_blocked(int nfuncs,
         T*       c_ptr = C + (size_t)cube * K3;
 
         // --- Distribute: cooperative coalesced load of the K^3 tensor ---
-        // All blockDim threads pull K^3 doubles from HBM with stride-1 reads
-        // (one cache line per 16 consecutive lanes), placing them in buf in
-        // canonical (i, j, k) layout: buf[i*WB + j*BK + k] = A[i, j, k].
+        // Each thread loads 4 CONTIGUOUS doubles from HBM as a single double4
+        // (global_load_dwordx8 = 32 bytes per lane on GFX90A).  Per-thread
+        // contiguity is what lets the compiler emit a wide load; across 16
+        // consecutive lanes this still touches just 4 cache lines (same HBM
+        // traffic as before, 4× fewer load instructions).
         //
-        // This changes buf's meaning:
-        //   OLD  (per-wave):  buf[s*WB + i*BK + j] = A[i, j, k'=s]   (s slowest)
-        //   NEW  (canonical): buf[i*WB + j*BK + k] = A[i, j, k]      (k fastest)
-        // The strides WB and BK coincide numerically, so post-corner-turn
-        // accesses (which treat buf as (a, b, k')) continue to work with the
-        // same indexing.  Only the distribute and pass-1 reads need to change.
+        // Per-thread HBM indices: a_ptr[4*tid .. 4*tid+3].
+        // For K=16, all 4 values share the same (i, j) with consecutive k:
+        //   k_start = (4*tid) % 16 ∈ {0, 4, 8, 12}
+        //
+        // buf layout is canonical (i, j, k), k fastest:
+        //   buf[i*WB + j*BK + k] = A[i, j, k]
         {
-            constexpr int NTHR = K * 64;    // block size
-            constexpr int NITER = K3 / NTHR; // 4 for K=16
-            #pragma unroll
-            for (int e = 0; e < NITER; ++e) {
-                int idx = tid + e * NTHR;
-                int i = idx / K2;
-                int j = (idx / K) % K;
-                int k = idx % K;
-                buf[i*WB + j*BK + k] = a_ptr[idx];
-            }
+            static_assert(K == 16, "wide-load distribute tuned for K=16");
+            const double4* a_ptr_vec = reinterpret_cast<const double4*>(a_ptr);
+            const int base_idx = 4 * tid;             // 0..K^3-4
+            const int i        =  base_idx >> 8;      // / K^2
+            const int j        = (base_idx >> 4) & 15;
+            const int k_start  =  base_idx &  15;     // 0, 4, 8, or 12
+
+            double4 v = a_ptr_vec[tid];               // one global_load_dwordx8
+            T* row = &buf[i*WB + j*BK + k_start];
+            row[0] = v.x;
+            row[1] = v.y;
+            row[2] = v.z;
+            row[3] = v.w;
         }
         __syncthreads();  // cross-wave writes visible before pass-1 reads
 
