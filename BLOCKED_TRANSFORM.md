@@ -183,10 +183,90 @@ GPU.
 
 ---
 
+## GPU implementation — measured perf on MI250X (K=16, one GCD)
+
+Wired up as level 7. One block per tensor; grid = `nfuncs`.
+Thread block = 64 × K threads = 1024 at K=16 (one wave per K×K slab).
+
+Step-by-step results through the optimization arc (N=2048, FP64):
+
+| version                                       | GF/s   | vs. prev |
+|-----------------------------------------------|-------:|---------:|
+| First cut (double-buffer LDS, B from HBM)     | 720    | —        |
+| Single-buffer LDS + B cached in LDS           | 2270   | 3.15×    |
+| + LDS row pad (kill 16-way bank conflict)     | 3320   | 1.46×    |
+| + drop same-wave-only barriers (8 → 3)        | 3460   | 1.04×    |
+| + fuse pass-2 store with corner-turn write    | 3475   | 1.00×    |
+| + swap pass-1 operands → pass-2 reads acc     | 3475   | 1.00×    |
+| + coalesced cooperative distribute            | 7400   | 2.13×    |
+| + one block per tensor (grid = nfuncs)        | 8880   | 1.20×    |
+| + `double4` loads for distribute + B cache    | **9340** | 1.05×  |
+
+Final result: **9340 GF/s ≈ 20 % of scalar FP64 peak ≈ 10 % of MFMA peak**.
+More importantly, **86 % of the HBM-bandwidth roofline** at the kernel's
+arithmetic intensity (AI = 6.14 FLOPs/byte). See `roofline.py` / `roofline.png`.
+
+### What we learned (not all optimizations paid off)
+
+A few commits are worth flagging because their lesson matters more than
+their number:
+
+- **LDS bank-conflict pad — big win (1.46×)**. Classic 16-way conflict pattern
+  in the corner turn. Simple row-stride pad from K to K+1.
+- **LDS instruction cuts gave ~nothing**. Dropping barriers (-60 % LDS wait),
+  fusing pass-2 into corner turn (-8 LDS ops/lane), register-fused pass-1→
+  pass-2 (-8 more LDS ops/lane) all looked big in counters (40 % fewer LDS
+  insts total) but moved wall clock by <5 %.  Interpretation: LDS was never
+  on the critical path in this kernel; those ops were fully hidden in the
+  shadow of MFMA/HBM latency.
+- **Coalesced distribute — biggest single win (2.1× at N=2048)**. The prior
+  per-wave stride-K reads were being served as individual cache lines by the
+  hardware coalescer — 16× amplification on L2 request count.  `rocprof` showed
+  HBM BW "only 26 % of peak" but actually the cache-line layer was saturated.
+  Counter-intuitive: the HBM BW counter was misleading.
+- **Widening the pass-3 store via LDS staging — regression (-17 %)**. The 4×
+  narrow stores were already coalescing into 4 cache-line writes at the
+  hardware level; adding a barrier + LDS round-trip lost more than the
+  saved instructions gained.
+- **MFMA swap trick (pass 1) — enables register fusion but no perf gain**.
+  Swapping operands in pass 1 makes its output layout match pass 2's input
+  exactly, so pass 2 reads acc directly.  Theoretically saves LDS traffic;
+  wall-clock impact hidden by memory bubbles (see point 2 above).
+
+### Compiler / ISA notes (GFX90A)
+
+- MFMA `v_mfma_f64_16x16x4f64` layouts confirmed empirically via
+  `test_mfma_layout.hip` (the upstream L4 comment had them wrong):
+  - A_frag (16×4): lane t → A[t%16][t/16]
+  - B_frag (4×16): lane t → B[t/16][t%16]
+  - D output (16×16): lane t acc[e] → D[(t/16) + 4e][t%16]
+- The widest global load/store on gfx90a is `global_{load,store}_dwordx4`
+  (128-bit, 2 doubles per lane).  `double4` in code compiles to a pair
+  of these.
+- LDS bank period: 32 banks × 4 bytes = 128 bytes.  Stride-K doubles
+  (K = 16) hits the same bank row → 16-way conflict; stride-(K+1) shifts
+  by 2 banks → conflict-free.
+
+---
+
+## K=32
+
+Not yet supported.  The thread-block limit (1024 threads) means 2·K=32
+waves × 64 = 2048 threads/block is too wide; we'd need each wave to handle
+2 sub-blocks, or fewer waves per block.  The corner-turn LDS buffer at
+K=32 is K³ × 8 = 256 KB, 4× over the 64 KB LDS cap, so it has to be
+streamed in chunks.  Design sketch lives in the CLAUDE.md at the repo
+root; implementation is the obvious next step.
+
+---
+
 ## References
 
 - `validate.hip` — CPU reference and GPU L1 correctness check
+- `validate_levels.hip` — multi-level correctness test (select L7 with `-l 7`)
+- `transformbench.hip` — throughput benchmark (`-l 7`)
 - `mra_python/algorithms.py::transform_nd_blocked` — NumPy version
-- `transform.h`, `transform_level{2,3,4}.h` — GPU optimization levels 1–4
-  (global memory → LDS → register blocking → MFMA); the blocked algorithm
-  is the natural successor to L4
+- `test_mfma_layout.hip` — diagnostic that verifies MFMA fragment layouts
+- `counters.txt`, `counters_deep.txt` — rocprof counter sets
+- `roofline.py`, `roofline.png` — roofline analysis
+- `transform.h`, `transform_level{2,3}.h` — earlier GPU levels for comparison
