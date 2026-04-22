@@ -68,9 +68,17 @@ void transform_kernel_blocked(int nfuncs,
     const int tid  = s * 64 + t;
     const int nthr = blockDim.x * blockDim.y;
 
-    // Cache B into LDS once.
-    for (int i = tid; i < K2; i += nthr) {
-        B_lds[i] = B[i];
+    // Cache B into LDS once, using wide double4 loads.
+    // K²=256 doubles; with double4 (4-wide) we need K²/4 = 64 threads -- the
+    // first wave does it, the rest wait at the barrier.  Each active thread
+    // issues a single global_load_dwordx4 (vs global_load_dwordx2 before),
+    // halving the load instruction count.  B pointer is cudaMalloc'd and
+    // B_lds is 16-byte aligned (offset K*WB*8 = 34816, multiple of 16).
+    static_assert(K2 % 4 == 0, "B cache double4 path needs K² divisible by 4");
+    if (tid < K2 / 4) {
+        const double4* B_vec     = reinterpret_cast<const double4*>(B);
+        double4*       B_lds_vec = reinterpret_cast<double4*>(B_lds);
+        B_lds_vec[tid] = B_vec[tid];
     }
     __syncthreads();
 
