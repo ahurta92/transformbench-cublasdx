@@ -6,6 +6,7 @@
 #include "transform.h"
 #include "transform_level2.h"
 #include "transform_level3.h"
+#include "transform_blocked.h"
 #include "util.h"
 
 template <typename T>
@@ -35,6 +36,11 @@ void transform_bench(int nreps, int ntasks, int nfuncs, int nblocks, int K,
     thread_dims = mra::mTxmq_L3_blockdim<T>(K);
     smem_size = (int)mra::L3_shmem_size<T>(K);
     level_name = "L3-regblk";
+    break;
+  case 7:
+    thread_dims = blocked_blockdim<T>(K);
+    smem_size = (int)blocked_shmem_size<T>(K);
+    level_name = "L7-blocked";
     break;
   default: // level == 1
     thread_dims = mra::mTxmq_blockdim<T>(K);
@@ -68,6 +74,9 @@ void transform_bench(int nreps, int ntasks, int nfuncs, int nblocks, int K,
         break;
       case 3:
         submit_transform_bench_L3<T>(nfuncs, nblocks, K, A, B, C, workspace, s);
+        break;
+      case 7:
+        submit_transform_bench_blocked<T>(nfuncs, nblocks, K, A, B, C, workspace, s);
         break;
       default:
         submit_transform_bench<T>(nfuncs, nblocks, K, A, B, C, workspace, s);

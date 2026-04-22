@@ -7,7 +7,7 @@
  *
  * Usage:
  *   ./validate_levels -l <level> -K <K> -N <N>
- *   level: 1=L1-global, 2=L2-lds, 3=L3-regblk  (default: 3)
+ *   level: 1=L1-global, 2=L2-lds, 3=L3-regblk, 7=blocked (corner-turn)  (default: 3)
  *   K: transform order (default: 16)
  *   N: number of cubes (default: 8)
  */
@@ -20,6 +20,7 @@
 #include "transform.h"
 #include "transform_level2.h"
 #include "transform_level3.h"
+#include "transform_blocked.h"
 #include "util.h"
 
 // ---------------------------------------------------------------------------
@@ -98,8 +99,11 @@ int main(int argc, char** argv)
         case 3:
             submit_transform_bench_L3<double>(N, nblocks, K, d_A, d_B, d_C, d_workspace, stream);
             break;
+        case 7:
+            submit_transform_bench_blocked<double>(N, nblocks, K, d_A, d_B, d_C, d_workspace, stream);
+            break;
         default:
-            std::cerr << "Unknown level " << level << " (supported: 1, 2, 3)\n";
+            std::cerr << "Unknown level " << level << " (supported: 1, 2, 3, 7)\n";
             return 1;
     }
     SYNC_STREAM(stream);
