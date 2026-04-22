@@ -2,7 +2,7 @@
 #include <cassert>
 #include "util.h"
 
-// transform_blocked.h — block-distributed 3D transform.
+// transform_blocked.h — block-distributed 3D transform with AMD MFMA.
 //
 // One wavefront owns one K×K block of the tensor throughout the computation:
 //   wave s initially holds A[:, :, k'=s];
@@ -12,25 +12,27 @@
 //   distribute      wave s loads A[:, :, k'=s]          (strided read from HBM)
 //   Pass 1 (local)  blk_s <- B^T · blk_s                (a, j')
 //   Pass 2 (local)  blk_s <- blk_s · B                  (a, b)
-//   corner turn     exchange through LDS: wave t ends up holding
+//   corner turn     LDS all-to-all: wave t ends up holding
 //                   temp2[a=t, b, k']  stored as (b, k')
 //   Pass 3 (local)  blk_t <- blk_t · B                  (b, c) — canonical
 //   store           wave s writes result[s, :, :] to HBM
 //
-// Pass 3 right-multiplies by B so the output lands in canonical (b, c) order
-// with no post-store transpose.
+// Local GEMMs use v_mfma_f64_16x16x4f64 (GFX90A).  One MFMA does a 16×16
+// output with K=4 contraction; for K=16 we chain 4 MFMAs per pass.
 //
-// This file: scalar FP64 ops, single-buffer + B-in-LDS.  K=16 only.
-// Thread-block size: 64 × K = 1024 threads at K=16 (wavefront size × K waves).
-//
-// LDS layout (34 KB at K=16, double):
-//   buf[K³]     single K³ scratch, reused across passes via register staging
+// LDS layout (34 KB at K=16):
+//   buf[K³]     single K³ scratch, in-place across passes via register stash
 //   B_lds[K²]   cached B matrix, shared across all waves
 //
-// Each pass computes its K²/64 output elements per lane into a register stash
-// (acc[]), __syncthreads, then writes back to buf -- allowing the same buffer
-// to serve as both input and output of the pass.  The corner turn uses the
-// same stash pattern to exchange across wave boundaries in place.
+// Thread-block size: 64 × K = 1024 threads at K=16.
+
+#if defined(__HIP__)
+typedef double v4f64 __attribute__((ext_vector_type(4)));
+
+__device__ inline v4f64 mfma_16x16x4_f64(double a, double b, v4f64 c) {
+    return __builtin_amdgcn_mfma_f64_16x16x4f64(a, b, c, 0, 0, 0);
+}
+#endif
 
 template<typename T, int K>
 __global__
@@ -41,138 +43,138 @@ void transform_kernel_blocked(int nfuncs,
                               T* __restrict__ C,
                               T* __restrict__ /*workspace unused*/)
 {
+    static_assert(std::is_same<T, double>::value, "MFMA path is FP64 only");
+    static_assert(K == 16, "MFMA path: K=16 only for now");
     static_assert(K * K % 64 == 0, "K^2 must be a multiple of the wavefront size (64)");
 
     constexpr int K2 = K * K;
     constexpr int K3 = K * K * K;
     constexpr int ELEMS_PER_LANE = K2 / 64;  // 4 at K=16
+    constexpr int NMFMA = K / 4;              // 4 MFMAs per K=16 pass
 
     extern __shared__ unsigned char _smem_blk[];
     T* buf   = reinterpret_cast<T*>(_smem_blk);
     T* B_lds = buf + K3;
 
-    const int s    = threadIdx.y;    // wave index (0..K-1); k' initially, a after corner turn
-    const int lane = threadIdx.x;    // 0..63
-    const int tid  = s * 64 + lane;
+    const int s = threadIdx.y;    // wave index (0..K-1)
+    const int t = threadIdx.x;    // lane within wave (0..63)
+    const int tid  = s * 64 + t;
     const int nthr = blockDim.x * blockDim.y;
 
-    // Cache B into LDS once per kernel invocation.
-    #pragma unroll
+    // Cache B into LDS once.
     for (int i = tid; i < K2; i += nthr) {
         B_lds[i] = B[i];
     }
     __syncthreads();
 
-    // Per-lane register stash for in-place passes.
-    T acc[ELEMS_PER_LANE];
-
     for (int cube = blockIdx.x; cube < nfuncs; cube += gridDim.x) {
         const T* a_ptr = A + (size_t)cube * K3;
         T*       c_ptr = C + (size_t)cube * K3;
 
-        // --- Distribute: wave s reads slab A[:, :, k'=s] into buf[s*K² ..] ---
-        // buf[s, i, j] = A[i, j, s]   (strided read from A's flat layout)
+        // --- Distribute: wave s reads A[:, :, k'=s] into buf[s, :, :] ---
         #pragma unroll
         for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = lane + e * 64;
+            int idx = t + e * 64;
             int i = idx / K;
             int j = idx % K;
             buf[s*K2 + i*K + j] = a_ptr[i*K2 + j*K + s];
         }
         __syncthreads();
 
-        // --- Pass 1 (in-place): blk_s <- B^T · blk_s   (rows: i' -> a) ---
-        // acc[e] = sum_i B[i, a] * buf[s, i, j]
+        // --- Pass 1 MFMA: out = B^T · blk  (rows: i' -> a) ---
+        // GFX90A v_mfma_f64_16x16x4f64 confirmed layouts:
+        //   A_frag (M=16, K=4):  lane t -> A[t%16][t/16]         (col-major)
+        //   B_frag (K=4, N=16):  lane t -> B[t/16][t%16]         (row-major)
+        //   D      (M=16, N=16): lane t acc[e] -> D[(t/16)+4*e][t%16]  (stride-4 rows)
+        //
+        // Pass 1: A_frag = B^T, B_frag = blk.
+        //   A_frag[m][k] = B^T[m][p*4+k] = B[p*4+k][m]
+        //   thread t contributes B[p*4 + t/16][t%16]
+        //   B_frag[k][n] = blk[p*4+k][n]
+        //   thread t contributes blk[p*4 + t/16][t%16]
+        v4f64 acc = v4f64{0.0, 0.0, 0.0, 0.0};
         #pragma unroll
-        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = lane + e * 64;
-            int a = idx / K;
-            int j = idx % K;
-            T sum = T(0);
-            #pragma unroll
-            for (int i = 0; i < K; ++i) {
-                sum += B_lds[i*K + a] * buf[s*K2 + i*K + j];
-            }
-            acc[e] = sum;
-        }
-        __syncthreads();  // all reads done across wave before any lane writes
-        #pragma unroll
-        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = lane + e * 64;
-            int a = idx / K;
-            int j = idx % K;
-            buf[s*K2 + a*K + j] = acc[e];
+        for (int p = 0; p < NMFMA; ++p) {
+            double a_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
+            double b_val = buf[s*K2 + (p*4 + (t >> 4)) * K + (t & 15)];
+            acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
         __syncthreads();
 
-        // --- Pass 2 (in-place): blk_s <- blk_s · B   (cols: j' -> b) ---
-        // acc[e] = sum_j buf[s, a, j] * B[j, b]
+        // Store: thread t acc[e] -> D[(t/16) + 4*e][t%16]
         #pragma unroll
-        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = lane + e * 64;
-            int a = idx / K;
-            int b = idx % K;
-            T sum = T(0);
-            #pragma unroll
-            for (int j = 0; j < K; ++j) {
-                sum += buf[s*K2 + a*K + j] * B_lds[j*K + b];
-            }
-            acc[e] = sum;
-        }
-        __syncthreads();
-        #pragma unroll
-        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = lane + e * 64;
-            int a = idx / K;
-            int b = idx % K;
-            buf[s*K2 + a*K + b] = acc[e];
+        for (int e = 0; e < 4; ++e) {
+            int row = (t >> 4) + 4 * e;      // a
+            int col = t & 15;                // j
+            buf[s*K2 + row*K + col] = acc[e];
         }
         __syncthreads();
 
-        // --- Corner turn (in-place with cross-wave writes): stash, sync, write ---
-        // Wave s reads its own region (wave s owns temp2[s, :, :]) into acc,
-        // then writes to destination wave = a at position (b, k'=s).
-        //   buf[a*K² + b*K + s] <- buf[s*K² + a*K + b]
+        // --- Pass 2 MFMA: out = blk · B  (cols: j' -> b) ---
+        //   A_frag[m][k] = blk[m][p*4+k]
+        //   thread t contributes blk[t%16][p*4 + t/16]
+        //   B_frag[k][n] = B[p*4+k][n]
+        //   thread t contributes B[p*4 + t/16][t%16]
+        acc = v4f64{0.0, 0.0, 0.0, 0.0};
         #pragma unroll
-        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = lane + e * 64;
-            int a = idx / K;
-            int b = idx % K;
-            acc[e] = buf[s*K2 + a*K + b];
-        }
-        __syncthreads();  // every wave has read its entire region
-        #pragma unroll
-        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = lane + e * 64;
-            int a = idx / K;
-            int b = idx % K;
-            buf[a*K2 + b*K + s] = acc[e];
+        for (int p = 0; p < NMFMA; ++p) {
+            double a_val = buf[s*K2 + (t & 15) * K + (p*4 + (t >> 4))];
+            double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
+            acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
         __syncthreads();
 
-        // --- Pass 3 + store (fused): blk_t <- blk_t · B, write directly to HBM ---
-        // Wave s now represents a=s.  Data lives at buf[s, b, k'].
-        // C[s, b, c] = sum_k buf[s, b, k] * B[k, c]
+        #pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            int row = (t >> 4) + 4 * e;      // a
+            int col = t & 15;                // b
+            buf[s*K2 + row*K + col] = acc[e];
+        }
+        __syncthreads();
+
+        // --- Corner turn (in-place with stash; cross-wave writes) ---
+        //   buf[a, b, s]  <-  buf[s, a, b]
+        T stash[ELEMS_PER_LANE];
         #pragma unroll
         for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = lane + e * 64;
-            int b = idx / K;
-            int c = idx % K;
-            T sum = T(0);
-            #pragma unroll
-            for (int k = 0; k < K; ++k) {
-                sum += buf[s*K2 + b*K + k] * B_lds[k*K + c];
-            }
-            c_ptr[s*K2 + b*K + c] = sum;
+            int idx = t + e * 64;
+            int a = idx / K;
+            int b = idx % K;
+            stash[e] = buf[s*K2 + a*K + b];
         }
-        // Barrier before next `cube` iteration overwrites buf in the distribute step.
         __syncthreads();
+        #pragma unroll
+        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
+            int idx = t + e * 64;
+            int a = idx / K;
+            int b = idx % K;
+            buf[a*K2 + b*K + s] = stash[e];
+        }
+        __syncthreads();
+
+        // --- Pass 3 MFMA + store: out = blk · B, write directly to HBM ---
+        // Same orientation as pass 2 (blk has (b, k') layout).
+        acc = v4f64{0.0, 0.0, 0.0, 0.0};
+        #pragma unroll
+        for (int p = 0; p < NMFMA; ++p) {
+            double a_val = buf[s*K2 + (t & 15) * K + (p*4 + (t >> 4))];
+            double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
+            acc = mfma_16x16x4_f64(a_val, b_val, acc);
+        }
+        // No sync: acc is in registers, about to write to HBM.
+
+        #pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            int row = (t >> 4) + 4 * e;      // b
+            int col = t & 15;                // c
+            c_ptr[s*K2 + row*K + col] = acc[e];
+        }
+        __syncthreads();  // before next cube iteration overwrites buf
     }
 }
 
 template<typename T>
 inline size_type blocked_shmem_size(int K) {
-    // One K³ scratch + one K² B cache
     return (size_type)((K * K * K + K * K) * sizeof(T));
 }
 
@@ -194,7 +196,7 @@ inline void submit_transform_bench_blocked(int nfuncs, int nblocks, int K,
         CALL_KERNEL((transform_kernel_blocked<T, Kv>), std::min(nfuncs, nblocks), td, smem, stream,
                     (nfuncs, A, B, C, workspace));
     } else {
-        fprintf(stderr, "blocked transform: K=%d not supported (first cut: K=16 only)\n", K);
+        fprintf(stderr, "blocked transform: K=%d not supported (MFMA path: K=16 only)\n", K);
         assert(false);
     }
 }
