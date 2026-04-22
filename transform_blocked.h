@@ -52,9 +52,16 @@ void transform_kernel_blocked(int nfuncs,
     constexpr int ELEMS_PER_LANE = K2 / 64;  // 4 at K=16
     constexpr int NMFMA = K / 4;              // 4 MFMAs per K=16 pass
 
+    // LDS bank-conflict pad: give each "row" inside a wave's K×K region an
+    // extra column of dead storage so within-wave stride-K accesses (pass 2/3
+    // A_frag loads, corner-turn cross-wave writes) don't collide on the same
+    // 128-byte bank row.  Per-wave region becomes K × (K+1) instead of K × K.
+    constexpr int BK = K + 1;          // padded inner (row) stride
+    constexpr int WB = K * BK;         // per-wave region size (padded)
+
     extern __shared__ unsigned char _smem_blk[];
     T* buf   = reinterpret_cast<T*>(_smem_blk);
-    T* B_lds = buf + K3;
+    T* B_lds = buf + K * WB;
 
     const int s = threadIdx.y;    // wave index (0..K-1)
     const int t = threadIdx.x;    // lane within wave (0..63)
@@ -77,7 +84,7 @@ void transform_kernel_blocked(int nfuncs,
             int idx = t + e * 64;
             int i = idx / K;
             int j = idx % K;
-            buf[s*K2 + i*K + j] = a_ptr[i*K2 + j*K + s];
+            buf[s*WB + i*BK + j] = a_ptr[i*K2 + j*K + s];
         }
         __syncthreads();
 
@@ -96,7 +103,7 @@ void transform_kernel_blocked(int nfuncs,
         #pragma unroll
         for (int p = 0; p < NMFMA; ++p) {
             double a_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
-            double b_val = buf[s*K2 + (p*4 + (t >> 4)) * K + (t & 15)];
+            double b_val = buf[s*WB + (p*4 + (t >> 4)) * BK + (t & 15)];
             acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
         __syncthreads();
@@ -106,7 +113,7 @@ void transform_kernel_blocked(int nfuncs,
         for (int e = 0; e < 4; ++e) {
             int row = (t >> 4) + 4 * e;      // a
             int col = t & 15;                // j
-            buf[s*K2 + row*K + col] = acc[e];
+            buf[s*WB + row*BK + col] = acc[e];
         }
         __syncthreads();
 
@@ -118,7 +125,7 @@ void transform_kernel_blocked(int nfuncs,
         acc = v4f64{0.0, 0.0, 0.0, 0.0};
         #pragma unroll
         for (int p = 0; p < NMFMA; ++p) {
-            double a_val = buf[s*K2 + (t & 15) * K + (p*4 + (t >> 4))];
+            double a_val = buf[s*WB + (t & 15) * BK + (p*4 + (t >> 4))];
             double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
             acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
@@ -128,7 +135,7 @@ void transform_kernel_blocked(int nfuncs,
         for (int e = 0; e < 4; ++e) {
             int row = (t >> 4) + 4 * e;      // a
             int col = t & 15;                // b
-            buf[s*K2 + row*K + col] = acc[e];
+            buf[s*WB + row*BK + col] = acc[e];
         }
         __syncthreads();
 
@@ -140,7 +147,7 @@ void transform_kernel_blocked(int nfuncs,
             int idx = t + e * 64;
             int a = idx / K;
             int b = idx % K;
-            stash[e] = buf[s*K2 + a*K + b];
+            stash[e] = buf[s*WB + a*BK + b];
         }
         __syncthreads();
         #pragma unroll
@@ -148,7 +155,7 @@ void transform_kernel_blocked(int nfuncs,
             int idx = t + e * 64;
             int a = idx / K;
             int b = idx % K;
-            buf[a*K2 + b*K + s] = stash[e];
+            buf[a*WB + b*BK + s] = stash[e];
         }
         __syncthreads();
 
@@ -157,7 +164,7 @@ void transform_kernel_blocked(int nfuncs,
         acc = v4f64{0.0, 0.0, 0.0, 0.0};
         #pragma unroll
         for (int p = 0; p < NMFMA; ++p) {
-            double a_val = buf[s*K2 + (t & 15) * K + (p*4 + (t >> 4))];
+            double a_val = buf[s*WB + (t & 15) * BK + (p*4 + (t >> 4))];
             double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
             acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
@@ -175,7 +182,8 @@ void transform_kernel_blocked(int nfuncs,
 
 template<typename T>
 inline size_type blocked_shmem_size(int K) {
-    return (size_type)((K * K * K + K * K) * sizeof(T));
+    // Padded buf (K × K × (K+1)) + B cache (K × K)
+    return (size_type)((K * K * (K + 1) + K * K) * sizeof(T));
 }
 
 template<typename T>
