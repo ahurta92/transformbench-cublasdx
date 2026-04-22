@@ -78,15 +78,30 @@ void transform_kernel_blocked(int nfuncs,
         const T* a_ptr = A + (size_t)cube * K3;
         T*       c_ptr = C + (size_t)cube * K3;
 
-        // --- Distribute: wave s reads A[:, :, k'=s] into buf[s, :, :] ---
-        #pragma unroll
-        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = t + e * 64;
-            int i = idx / K;
-            int j = idx % K;
-            buf[s*WB + i*BK + j] = a_ptr[i*K2 + j*K + s];
+        // --- Distribute: cooperative coalesced load of the K^3 tensor ---
+        // All blockDim threads pull K^3 doubles from HBM with stride-1 reads
+        // (one cache line per 16 consecutive lanes), placing them in buf in
+        // canonical (i, j, k) layout: buf[i*WB + j*BK + k] = A[i, j, k].
+        //
+        // This changes buf's meaning:
+        //   OLD  (per-wave):  buf[s*WB + i*BK + j] = A[i, j, k'=s]   (s slowest)
+        //   NEW  (canonical): buf[i*WB + j*BK + k] = A[i, j, k]      (k fastest)
+        // The strides WB and BK coincide numerically, so post-corner-turn
+        // accesses (which treat buf as (a, b, k')) continue to work with the
+        // same indexing.  Only the distribute and pass-1 reads need to change.
+        {
+            constexpr int NTHR = K * 64;    // block size
+            constexpr int NITER = K3 / NTHR; // 4 for K=16
+            #pragma unroll
+            for (int e = 0; e < NITER; ++e) {
+                int idx = tid + e * NTHR;
+                int i = idx / K2;
+                int j = (idx / K) % K;
+                int k = idx % K;
+                buf[i*WB + j*BK + k] = a_ptr[idx];
+            }
         }
-        // No __syncthreads: pass 1 reads wave s's own region (intra-wave).
+        __syncthreads();  // cross-wave writes visible before pass-1 reads
 
         // --- Pass 1 MFMA (SWAPPED OPERANDS): compute blk^T · B instead of B^T · blk ---
         // GFX90A v_mfma_f64_16x16x4f64 confirmed layouts:
@@ -102,10 +117,12 @@ void transform_kernel_blocked(int nfuncs,
         //
         // This is exactly the layout pass 2's A_frag wants at iter p = e,
         // so pass 2 can consume pass 1's acc directly -- no LDS round trip.
+        // With canonical buf layout, thread t's A_frag contribution at iter p
+        // lives at buf[i*WB + j*BK + k] with i=p*4+t/16, j=t%16, k=s.
         v4f64 acc1 = v4f64{0.0, 0.0, 0.0, 0.0};
         #pragma unroll
         for (int p = 0; p < NMFMA; ++p) {
-            double a_val = buf[s*WB + (p*4 + (t >> 4)) * BK + (t & 15)];
+            double a_val = buf[(p*4 + (t >> 4)) * WB + (t & 15) * BK + s];
             double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
             acc1 = mfma_16x16x4_f64(a_val, b_val, acc1);
         }
