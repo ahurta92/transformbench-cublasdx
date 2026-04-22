@@ -74,7 +74,10 @@ void transform_kernel_blocked(int nfuncs,
     }
     __syncthreads();
 
-    for (int cube = blockIdx.x; cube < nfuncs; cube += gridDim.x) {
+    // One block = one tensor.  Grid is sized to nfuncs at launch.
+    {
+        const int cube = blockIdx.x;
+        if (cube >= nfuncs) return;
         const T* a_ptr = A + (size_t)cube * K3;
         T*       c_ptr = C + (size_t)cube * K3;
 
@@ -174,9 +177,6 @@ void transform_kernel_blocked(int nfuncs,
             int col = t & 15;                // c
             c_ptr[s*K2 + row*K + col] = acc[e];
         }
-        // No __syncthreads: next iter's distribute writes only wave s's own
-        // buf region; other waves may still be in pass 3 on the current
-        // tensor reading their own region — no cross-wave conflict.
     }
 }
 
@@ -192,7 +192,7 @@ inline Dim3 blocked_blockdim(int K) {
 }
 
 template<typename T>
-inline void submit_transform_bench_blocked(int nfuncs, int nblocks, int K,
+inline void submit_transform_bench_blocked(int nfuncs, int /*nblocks*/, int K,
                                            const T* A, const T* B, T* C, T* workspace,
                                            Stream stream)
 {
@@ -201,7 +201,9 @@ inline void submit_transform_bench_blocked(int nfuncs, int nblocks, int K,
         Dim3      td   = blocked_blockdim<T>(Kv);
         size_type smem = blocked_shmem_size<T>(Kv);
         CONFIGURE_KERNEL((transform_kernel_blocked<T, Kv>), smem);
-        CALL_KERNEL((transform_kernel_blocked<T, Kv>), std::min(nfuncs, nblocks), td, smem, stream,
+        // Grid = nfuncs: one block per tensor.  nblocks arg is ignored here
+        // (matches upstream convention for single-function-per-kernel kernels).
+        CALL_KERNEL((transform_kernel_blocked<T, Kv>), nfuncs, td, smem, stream,
                     (nfuncs, A, B, C, workspace));
     } else {
         fprintf(stderr, "blocked transform: K=%d not supported (MFMA path: K=16 only)\n", K);
