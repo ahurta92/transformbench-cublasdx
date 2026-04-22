@@ -86,7 +86,7 @@ void transform_kernel_blocked(int nfuncs,
             int j = idx % K;
             buf[s*WB + i*BK + j] = a_ptr[i*K2 + j*K + s];
         }
-        __syncthreads();
+        // No __syncthreads: pass 1 reads wave s's own region (intra-wave).
 
         // --- Pass 1 MFMA: out = B^T · blk  (rows: i' -> a) ---
         // GFX90A v_mfma_f64_16x16x4f64 confirmed layouts:
@@ -106,7 +106,7 @@ void transform_kernel_blocked(int nfuncs,
             double b_val = buf[s*WB + (p*4 + (t >> 4)) * BK + (t & 15)];
             acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
-        __syncthreads();
+        // No __syncthreads: wave in lockstep; reads done before writes start.
 
         // Store: thread t acc[e] -> D[(t/16) + 4*e][t%16]
         #pragma unroll
@@ -115,7 +115,7 @@ void transform_kernel_blocked(int nfuncs,
             int col = t & 15;                // j
             buf[s*WB + row*BK + col] = acc[e];
         }
-        __syncthreads();
+        // No __syncthreads: pass 2 reads wave s's own region (intra-wave).
 
         // --- Pass 2 MFMA: out = blk · B  (cols: j' -> b) ---
         //   A_frag[m][k] = blk[m][p*4+k]
@@ -129,7 +129,7 @@ void transform_kernel_blocked(int nfuncs,
             double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
             acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
-        __syncthreads();
+        // No __syncthreads: wave in lockstep; reads done before writes start.
 
         #pragma unroll
         for (int e = 0; e < 4; ++e) {
@@ -137,7 +137,7 @@ void transform_kernel_blocked(int nfuncs,
             int col = t & 15;                // b
             buf[s*WB + row*BK + col] = acc[e];
         }
-        __syncthreads();
+        // No __syncthreads: corner turn stash reads wave s's own region (intra-wave).
 
         // --- Corner turn (in-place with stash; cross-wave writes) ---
         //   buf[a, b, s]  <-  buf[s, a, b]
@@ -176,7 +176,9 @@ void transform_kernel_blocked(int nfuncs,
             int col = t & 15;                // c
             c_ptr[s*K2 + row*K + col] = acc[e];
         }
-        __syncthreads();  // before next cube iteration overwrites buf
+        // No __syncthreads: next iter's distribute writes only wave s's own
+        // buf region; other waves may still be in pass 3 on the current
+        // tensor reading their own region — no cross-wave conflict.
     }
 }
 
