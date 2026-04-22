@@ -129,33 +129,22 @@ void transform_kernel_blocked(int nfuncs,
             double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
             acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
-        // No __syncthreads: wave in lockstep; reads done before writes start.
+        // Pass 2 output is in acc.  The corner-turn stash step used to read
+        // pass 2's buf at positions (a = t/16 + 4e, b = t%16) -- exactly the
+        // positions MFMA already deposited in acc.  So acc[e] IS the stash;
+        // we can skip both the pass-2 store and the stash read, and write
+        // acc directly into the cross-wave destination below.
 
-        #pragma unroll
-        for (int e = 0; e < 4; ++e) {
-            int row = (t >> 4) + 4 * e;      // a
-            int col = t & 15;                // b
-            buf[s*WB + row*BK + col] = acc[e];
-        }
-        // No __syncthreads: corner turn stash reads wave s's own region (intra-wave).
+        __syncthreads();  // all waves done with pass-2 reads from own region
 
-        // --- Corner turn (in-place with stash; cross-wave writes) ---
-        //   buf[a, b, s]  <-  buf[s, a, b]
-        T stash[ELEMS_PER_LANE];
+        // --- Corner turn (cross-wave write, fused with pass-2 store) ---
+        //   buf[a*WB + b*BK + s]  <-  acc[e]   where (a, b) = (t/16 + 4e, t%16)
         #pragma unroll
         for (int e = 0; e < ELEMS_PER_LANE; ++e) {
             int idx = t + e * 64;
             int a = idx / K;
             int b = idx % K;
-            stash[e] = buf[s*WB + a*BK + b];
-        }
-        __syncthreads();
-        #pragma unroll
-        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-            int idx = t + e * 64;
-            int a = idx / K;
-            int b = idx % K;
-            buf[a*WB + b*BK + s] = stash[e];
+            buf[a*WB + b*BK + s] = acc[e];
         }
         __syncthreads();
 
