@@ -88,44 +88,36 @@ void transform_kernel_blocked(int nfuncs,
         }
         // No __syncthreads: pass 1 reads wave s's own region (intra-wave).
 
-        // --- Pass 1 MFMA: out = B^T · blk  (rows: i' -> a) ---
+        // --- Pass 1 MFMA (SWAPPED OPERANDS): compute blk^T · B instead of B^T · blk ---
         // GFX90A v_mfma_f64_16x16x4f64 confirmed layouts:
         //   A_frag (M=16, K=4):  lane t -> A[t%16][t/16]         (col-major)
         //   B_frag (K=4, N=16):  lane t -> B[t/16][t%16]         (row-major)
-        //   D      (M=16, N=16): lane t acc[e] -> D[(t/16)+4*e][t%16]  (stride-4 rows)
+        //   D      (M=16, N=16): lane t acc[e] -> D[(t/16)+4*e][t%16]
         //
-        // Pass 1: A_frag = B^T, B_frag = blk.
-        //   A_frag[m][k] = B^T[m][p*4+k] = B[p*4+k][m]
-        //   thread t contributes B[p*4 + t/16][t%16]
-        //   B_frag[k][n] = blk[p*4+k][n]
-        //   thread t contributes blk[p*4 + t/16][t%16]
+        // By feeding A_frag = blk^T (from buf, treating (i,j) as if transposed)
+        // and B_frag = B (from B_lds), MFMA produces D where
+        //   D[j][a] = sum_i blk[i][j] * B[i][a] = temp1[a][j]
+        // i.e. temp1 stored with its axes swapped in the register file:
+        //   lane t, acc[e]  ==  temp1[t%16][(t/16) + 4*e]
+        //
+        // This is exactly the layout pass 2's A_frag wants at iter p = e,
+        // so pass 2 can consume pass 1's acc directly -- no LDS round trip.
+        v4f64 acc1 = v4f64{0.0, 0.0, 0.0, 0.0};
+        #pragma unroll
+        for (int p = 0; p < NMFMA; ++p) {
+            double a_val = buf[s*WB + (p*4 + (t >> 4)) * BK + (t & 15)];
+            double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
+            acc1 = mfma_16x16x4_f64(a_val, b_val, acc1);
+        }
+        // No LDS writeback: acc1[p] is pass 2's a_val at iter p directly.
+
+        // --- Pass 2 MFMA: out = temp1 · B  (cols: j' -> b) ---
+        //   A_frag = temp1 (from acc1), B_frag = B.
+        //   thread t at iter p uses acc1[p] = temp1[t%16][p*4 + t/16]
         v4f64 acc = v4f64{0.0, 0.0, 0.0, 0.0};
         #pragma unroll
         for (int p = 0; p < NMFMA; ++p) {
-            double a_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
-            double b_val = buf[s*WB + (p*4 + (t >> 4)) * BK + (t & 15)];
-            acc = mfma_16x16x4_f64(a_val, b_val, acc);
-        }
-        // No __syncthreads: wave in lockstep; reads done before writes start.
-
-        // Store: thread t acc[e] -> D[(t/16) + 4*e][t%16]
-        #pragma unroll
-        for (int e = 0; e < 4; ++e) {
-            int row = (t >> 4) + 4 * e;      // a
-            int col = t & 15;                // j
-            buf[s*WB + row*BK + col] = acc[e];
-        }
-        // No __syncthreads: pass 2 reads wave s's own region (intra-wave).
-
-        // --- Pass 2 MFMA: out = blk · B  (cols: j' -> b) ---
-        //   A_frag[m][k] = blk[m][p*4+k]
-        //   thread t contributes blk[t%16][p*4 + t/16]
-        //   B_frag[k][n] = B[p*4+k][n]
-        //   thread t contributes B[p*4 + t/16][t%16]
-        acc = v4f64{0.0, 0.0, 0.0, 0.0};
-        #pragma unroll
-        for (int p = 0; p < NMFMA; ++p) {
-            double a_val = buf[s*WB + (t & 15) * BK + (p*4 + (t >> 4))];
+            double a_val = acc1[p];
             double b_val = B_lds[(p*4 + (t >> 4)) * K + (t & 15)];
             acc = mfma_16x16x4_f64(a_val, b_val, acc);
         }
