@@ -2,6 +2,16 @@
 #include <cassert>
 #include "util.h"
 
+#if defined(__HIP__)
+typedef double v4f64 __attribute__((ext_vector_type(4)));
+
+__device__ inline v4f64 mfma_16x16x4_f64_shared(double a, double b, v4f64 c) {
+    return __builtin_amdgcn_mfma_f64_16x16x4f64(a, b, c, 0, 0, 0);
+}
+#endif
+
+#include "transform_blocked_k20.h"
+
 // transform_blocked.h — block-distributed 3D transform with AMD MFMA.
 //
 // One wavefront owns one K×K block of the tensor throughout the computation:
@@ -27,8 +37,6 @@
 // Thread-block size: 64 × K = 1024 threads at K=16.
 
 #if defined(__HIP__)
-typedef double v4f64 __attribute__((ext_vector_type(4)));
-
 __device__ inline v4f64 mfma_16x16x4_f64(double a, double b, v4f64 c) {
     return __builtin_amdgcn_mfma_f64_16x16x4f64(a, b, c, 0, 0, 0);
 }
@@ -218,8 +226,10 @@ inline void submit_transform_bench_blocked(int nfuncs, int /*nblocks*/, int K,
         // (matches upstream convention for single-function-per-kernel kernels).
         CALL_KERNEL((transform_kernel_blocked<T, Kv>), nfuncs, td, smem, stream,
                     (nfuncs, A, B, C, workspace));
+    } else if (K == 20) {
+        submit_transform_bench_blocked_k20<T>(nfuncs, A, B, C, workspace, stream);
     } else {
-        fprintf(stderr, "blocked transform: K=%d not supported (MFMA path: K=16 only)\n", K);
+        fprintf(stderr, "blocked transform: K=%d not supported\n", K);
         assert(false);
     }
 }

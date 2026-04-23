@@ -50,6 +50,13 @@ inline void submit_transform_bench_L3(int nfuncs, int nblocks, int K,
         CONFIGURE_KERNEL((transform_kernel_L3<T, Kv>), smem);
         CALL_KERNEL((transform_kernel_L3<T, Kv>), std::min(nfuncs, nblocks), td, smem, stream,
                     (nfuncs, A, B, C, workspace));
+    } else if (K == 20) {
+        constexpr int Kv = 20;
+        Dim3      td   = mra::mTxmq_L3_blockdim<T>(Kv);
+        size_type smem = mra::L3_shmem_size<T>(Kv);
+        CONFIGURE_KERNEL((transform_kernel_L3<T, Kv>), smem);
+        CALL_KERNEL((transform_kernel_L3<T, Kv>), std::min(nfuncs, nblocks), td, smem, stream,
+                    (nfuncs, A, B, C, workspace));
     } else if (K == 32) {
         constexpr int Kv = 32;
         Dim3      td   = mra::mTxmq_L3_blockdim<T>(Kv);
