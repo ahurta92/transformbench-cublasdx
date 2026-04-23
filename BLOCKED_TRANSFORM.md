@@ -249,14 +249,75 @@ their number:
 
 ---
 
-## K=32
+## K=32 — design note (not yet implemented)
 
-Not yet supported.  The thread-block limit (1024 threads) means 2·K=32
-waves × 64 = 2048 threads/block is too wide; we'd need each wave to handle
-2 sub-blocks, or fewer waves per block.  The corner-turn LDS buffer at
-K=32 is K³ × 8 = 256 KB, 4× over the 64 KB LDS cap, so it has to be
-streamed in chunks.  Design sketch lives in the CLAUDE.md at the repo
-root; implementation is the obvious next step.
+At K=32 the K=16 algorithm's working set doesn't fit in LDS, even split
+across multiple blocks.  This is a real redesign, not a tweak.
+
+### The budget problem
+
+| thing                                          | K=16         | K=32         |
+|------------------------------------------------|--------------|--------------|
+| full K³ tensor                                 | 4 K dbl = 32 KB | 32 K dbl = **256 KB** |
+| per-wave K×K slab                              | 256 dbl = 2 KB | 1024 dbl = 8 KB |
+| 16 waves × slab (one block per tensor)         | 32 KB        | **128 KB**   |
+| 16 waves × slab with K+1 pad                   | 34 KB        | **132 KB**   |
+| LDS cap (MI250X)                               | 64 KB        | 64 KB        |
+
+Even splitting into 2 blocks (each handling K/2 of k') gives 128 KB/block —
+2× over cap.  There's no simple split that makes the K=16 algorithm fit.
+
+### What must change
+
+The working set per wave has to shrink from K×K to something smaller.
+Two candidate approaches:
+
+**(A) Each wave holds K × K/2 (half-slab).**
+  - 2 waves cooperate on a full K×K slab.
+  - Per-wave LDS: 512 dbl = 4 KB.  32 waves × 4 KB = 128 KB.  Still over.
+  - 16 waves × 4 KB = 64 KB, halved coverage.  Would need 2 blocks to cover.
+
+**(B) Stream the corner turn in k'-chunks.**
+  - Hold only a chunk of the tensor at a time: K × K × (K/4) = 8 KB · 4 = 32 KB.
+  - Pass 3 accumulates across 4 chunked corner turns into registers.
+  - Extra HBM passes for re-reading A, unless we also chunk passes 1/2.
+  - Complex but fits the budget.
+
+**(C) Atomic-add reduction across 4 blocks.**
+  - 4 blocks per tensor; each handles K/4 = 8 values of k'.
+  - Each block's pass 3 contributes a partial; atomicAdd to HBM C.
+  - 4 atomics per output element, 4K³ = 128K atomics per tensor.
+  - Simpler code, slower arithmetic path.
+
+### Thread-block sizing
+
+At K=32, blockDim must be ≤ 1024 threads.  With 64-thread waves, that's
+≤ 16 waves per block.  So we can't have 32 waves (one per k') in a single
+block — each wave must handle ≥ 2 slabs, or blocks must handle fewer k'
+values.
+
+### Recommended approach for the next iteration
+
+Start with **(C) — 4 blocks per tensor with atomic add**, because:
+- Reuses the existing K=16 algorithm shape almost verbatim (per-block
+  pipeline is identical).
+- Simplest to get correct; good baseline before optimizing.
+- Perf will be bad (atomics, 4× HBM writes for reduction) but it
+  validates the design.
+
+Then iterate toward **(B)** — streaming — which preserves single-block-
+per-tensor semantics and should be faster once correct.
+
+### Open questions worth probing first
+
+- What does the actual MADNESS workload look like at K=32?  If `nfuncs`
+  is small, block-count explosion from approach (C) isn't a problem
+  but atomic contention might be.
+- Does hipBLAS's batched DGEMM do better than anything we can write by
+  hand at K=32?  Worth measuring L6 (kron) on real K=32 workloads as
+  a reference point.
+- L4 / L5 (upstream MFMA + rocWMMA paths) likely have K=32 code; are
+  their designs worth stealing?
 
 ---
 
