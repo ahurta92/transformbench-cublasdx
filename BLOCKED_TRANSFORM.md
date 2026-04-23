@@ -249,6 +249,93 @@ their number:
 
 ---
 
+## K=20 / K=24 — use v_mfma_f64_4x4x4f64 (design note)
+
+K=20 and K=24 are the scientifically relevant odd-size cases (K=32 turns
+out not to be; it was a suggestion just because the 16-divisibility
+worked nicely with MFMA 16×16×4).  Neither K=20 nor K=24 divides by 16,
+so they can't use `v_mfma_f64_16x16x4f64` directly without padding, and
+padding to K=32 blows LDS.
+
+The path forward is to use the smaller **`v_mfma_f64_4x4x4f64`** MFMA
+variant — same hardware matrix core, 4×4 output tile instead of 16×16.
+This avoids padding entirely because 4 divides both 20 and 24 cleanly.
+
+### Tile-count cost
+
+Per pass, per wave:
+
+|       | 16×16×4 path (K=16) | 4×4×4 path (K=20) | 4×4×4 path (K=24) |
+|-------|---------------------|--------------------|--------------------|
+| output tiles per K slice | 1   | 25 = 5×5          | 36 = 6×6          |
+| K slices needed          | 4   | 5                 | 6                 |
+| MFMA calls per pass      | 4   | 125               | 216               |
+
+The 4×4×4 approach uses ~30× more MFMA calls per pass than the K=16
+kernel.  On gfx90a, matrix-core throughput for all f64 MFMA variants
+is the same per-cycle-of-matrix-core, so more-but-smaller calls is a
+wash on raw compute — but the **issue rate** may bottleneck at low
+occupancy.
+
+### Open: the 4×4×4 fragment layout
+
+`v_mfma_f64_4x4x4f64` on gfx90a returns **one double per lane** — not
+v4f64.  64 lanes × 1 = 64 output values total = four 4×4 blocks.  Empirical
+probing (see diagnostic pattern below) suggests it's the **"4-blocks
+broadcast"** variant where the A matrix is broadcast across all four
+4×4 sub-outputs rather than 4 independent GEMMs.  That means the
+**semantic tile is a single 4×4 with 4× replicated output** — using it
+to compute 4 different tiles needs careful ABID/BLGP bit manipulation.
+
+Before implementing anything, we need to:
+
+1. Write a `test_mfma_4x4x4_layout.hip` probe (mirroring the
+   `test_mfma_layout.hip` we used for 16×16×4) to pin down exactly
+   which lanes hold which (A, B, D) elements for a given CBSZ/ABID/BLGP
+   setting.  The probe I ran fed A[m][k] = m per 16-lane batch, got
+   identical output across all four batches — consistent with the
+   4-batch-broadcast hypothesis but not conclusive.
+2. Read the gfx90a ISA section on CBSZ/ABID/BLGP to understand what
+   control bits produce 4 INDEPENDENT tile outputs.
+3. Only after (1)+(2) are clear, design the tile-loop.
+
+### Algorithm shape (once the 4×4×4 layout is understood)
+
+Assuming we find a CBSZ/BLGP combination that gives 4 independent tiles:
+
+- Replace the single 16×16 `mma_sync` in each of the three passes
+  with a nested pair of tile loops:
+  ```
+  for (row_tile = 0; row_tile < K/4; ++row_tile)
+    for (col_tile = 0; col_tile < K/4; ++col_tile)
+      for (k_slice = 0; k_slice < K/4; ++k_slice)
+        MFMA_4x4x4(...)
+  ```
+  At K=20: 5×5×5 = 125 calls per pass per wave.
+- The per-wave output is K² = 400 (K=20) or 576 (K=24) doubles.
+  400/64 = 6.25 per lane — **not integer**.  For K=20 this means
+  some lanes will have 6 elements, others 7.  Awkward.  May want
+  to pad to K=21 internally (6.56/lane)? Or group 2 MFMA calls
+  per pair of lanes (?). Ugly.
+  576/64 = 9 per lane — clean for K=24.
+- LDS: K³ × 8 = 20³×8 = 64 KB (K=20), 24³×8 = 110 KB (K=24).
+  K=20 just fits; K=24 still over.  So K=24 needs the same
+  streaming story as K=32 (see section below).
+
+### Recommended next steps (in order)
+
+1. **Measure L3 at K=20 and K=24 first.** If L3 hits 50%+ of the HBM
+   roofline at these K values, a custom MFMA kernel may not be worth
+   the complexity.
+2. **Pin down the 4×4×4 fragment layout** via a diagnostic kernel.
+3. **Start with K=20 using 4×4×4** — clean LDS budget, even if awkward
+   lane distribution.  K=24 can follow after streaming is figured out.
+4. Consider a hybrid **16×16×4 main + 4×4×4 remainder** tiling (e.g.
+   K=20 = 16+4 in each dim gives one 16×16 main tile + strips +
+   corner).  Complex but avoids most of the 4×4×4 instruction overhead.
+
+---
+
 ## K=32 — design note (not yet implemented)
 
 At K=32 the K=16 algorithm's working set doesn't fit in LDS, even split
