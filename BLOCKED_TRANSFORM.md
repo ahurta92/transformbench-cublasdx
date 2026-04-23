@@ -277,27 +277,32 @@ is the same per-cycle-of-matrix-core, so more-but-smaller calls is a
 wash on raw compute — but the **issue rate** may bottleneck at low
 occupancy.
 
-### Open: the 4×4×4 fragment layout
+### 4×4×4 fragment layout — CONFIRMED via probe
 
-`v_mfma_f64_4x4x4f64` on gfx90a returns **one double per lane** — not
-v4f64.  64 lanes × 1 = 64 output values total = four 4×4 blocks.  Empirical
-probing (see diagnostic pattern below) suggests it's the **"4-blocks
-broadcast"** variant where the A matrix is broadcast across all four
-4×4 sub-outputs rather than 4 independent GEMMs.  That means the
-**semantic tile is a single 4×4 with 4× replicated output** — using it
-to compute 4 different tiles needs careful ABID/BLGP bit manipulation.
+`v_mfma_f64_4x4x4f64` on gfx90a returns **one double per lane**.
+64 lanes × 1 = 64 output values = **four INDEPENDENT 4×4×4 GEMMs**
+(NOT broadcast — earlier hypothesis disproved by `test_mfma_4x4x4_layout{,2,3}.hip`).
 
-Before implementing anything, we need to:
+With the lane decomposition `S = 16·α + 4·g + β` where `β = S%4`,
+`g = (S/4)%4` and `α = S/16`, the **group index** is `g` (∈ {0,1,2,3}).
+Each of the four groups computes its own 4×4×4 GEMM `D_g = A_g · B_g`:
 
-1. Write a `test_mfma_4x4x4_layout.hip` probe (mirroring the
-   `test_mfma_layout.hip` we used for 16×16×4) to pin down exactly
-   which lanes hold which (A, B, D) elements for a given CBSZ/ABID/BLGP
-   setting.  The probe I ran fed A[m][k] = m per 16-lane batch, got
-   identical output across all four batches — consistent with the
-   4-batch-broadcast hypothesis but not conclusive.
-2. Read the gfx90a ISA section on CBSZ/ABID/BLGP to understand what
-   control bits produce 4 INDEPENDENT tile outputs.
-3. Only after (1)+(2) are clear, design the tile-loop.
+| fragment  | lane S holds                 |
+|-----------|------------------------------|
+| A (4×4)   | `A_g[m = β ][k = α]`         |
+| B (4×4)   | `B_g[k = α ][n = β]`         |
+| D (4×4)   | `D_g[m = α ][n = β]`         |
+
+So A is column-major across 16 lanes, B row-major, D row-major, and
+`t/16`/`(t/4)%4` each play different roles for the input vs. output
+fragments — A's column index is where D's row index comes from, and
+vice versa.  The four `g`-groups share nothing: `g=1` reads none of
+`g=0`'s lanes.
+
+This is strictly better for our K=20 case than 4×-broadcast would have
+been: we can pack 4 independent 4×4 output tiles into a single
+instruction, if we can lay out A/B so the four groups see different
+tiles.
 
 ### Algorithm shape (once the 4×4×4 layout is understood)
 
@@ -333,6 +338,89 @@ Assuming we find a CBSZ/BLGP combination that gives 4 independent tiles:
 4. Consider a hybrid **16×16×4 main + 4×4×4 remainder** tiling (e.g.
    K=20 = 16+4 in each dim gives one 16×16 main tile + strips +
    corner).  Complex but avoids most of the 4×4×4 instruction overhead.
+
+### K=20 status: implemented (MFMA via 4 independent tiles per call)
+
+`transform_blocked_k20.h` ships both a scalar correctness baseline and
+a 4×4×4 MFMA path.  Design choices and constraints:
+
+| knob                    | K=20 choice                                           |
+|-------------------------|-------------------------------------------------------|
+| threads/block           | 64 × 10 = 640  (20 waves would exceed the 1024 cap)   |
+| slabs per wave          | 2 (wave w owns k' ∈ {w, w+10})                        |
+| LDS tensor buf          | K³ = 8000 doubles = 64 KB, **unpadded**               |
+| B caching               | read from HBM (no room for B_lds at 64 KB cap)        |
+| tile pattern            | 25 output tiles of 4×4 per slab, 7 MFMA rounds × 5 k-slices |
+| wasted groups           | last round has 3 unused groups (fed zero)             |
+
+Measured @ N=2048, FP64, MI250X single GCD:
+
+| variant                               | GF/s | vs. L3  | kernel µs | MFMA busy | LDS wait/inst |
+|---------------------------------------|-----:|--------:|----------:|----------:|--------------:|
+| L3 (register-block)                   | 1967 | —       | —         | —         | —             |
+| L7 scalar (K=20)                      | 1083 | 0.55×   | —         | —         | —             |
+| L7 pure 4×4×4                         | 2787 | 1.42×   | 753       | 12.2 %    | 5.5 cyc       |
+| L7 hybrid 16×16×4 + 4×4×4             | 3480 | 1.77×   | 591       | 11.1 %    | 19.4 cyc      |
+| **L7 hybrid + fusion + wide dist**    | **6900** | **3.51×** | **370** | **17.8 %** | **4.1 cyc** |
+
+The final configuration pairs three changes:
+
+1. **Hybrid tiling** — 16×16×4 MFMA for the main 16×16 sub-tile, 4×4×4 MFMA
+   for the 16×4 / 4×16 strips and the 4×4 corner.  43 % fewer MFMA issues
+   than the pure 4×4×4 path.
+2. **Pass 1 → Pass 2 register fusion** (operand-swap trick from the K=16
+   kernel).  Pass 1 computes `D = temp1^T` so the main accumulator `p1_main[e]`
+   at lane t directly equals `temp1[t%16][(t/16)+4e]` — exactly what pass 2's
+   A-frag wants.  Pass 1 right strip gets the same treatment and feeds pass 2's
+   5th k-slice from register `p1_right`.  Bottom strip and corner can't be
+   fused cleanly (α/β transpose mismatch) and still round-trip through LDS.
+   LDS instructions dropped 32 %, LDS wait cycles dropped 79 %.
+3. **double4 distribute** — K³ = 8000 doubles = 2000 `double4` loads.
+
+Remaining headroom (all less impactful than the above):
+- **MFMA busy still 18 %** — there's still ~2× to gain before matching K=16's
+  ~50 % MFMA-busy ceiling; further reductions in VALU overhead (mostly in
+  the bottom/corner 4×4×4 loops) and in bank conflicts (currently 16-way on
+  the stride-K=20 accesses for bottom/corner) would help.
+- **No B_lds** — single-block-per-tensor has no room for a 3.2 KB B cache
+  after the K³ = 64 KB `buf`.  Attempted 2-blocks-per-tensor with padded
+  layout + B_lds but atomicAdd + pre-zero overhead (+500 MB HBM) erased the
+  bank-conflict win — see notes below.
+- **Pass 2 → Pass 3 fusion** isn't feasible: pass 3's cross-wave corner-turn
+  REQUIRES data in LDS.
+
+### Experiments that didn't pay off
+
+- **2 blocks per tensor + K+1 padded LDS + atomicAdd** (`transform_kernel_blocked_k20_split`
+  kept in the tree for reference).  Bank conflicts did drop to 0.2-way, but
+  atomic read-modify-write on C and pre-zero memset inflated HBM traffic
+  3× (258 → 752 MB), VALU went up 2.6×, and MFMA busy *fell* to 6 %.  Net:
+  ~1.9× slower.  Take-away: bank conflict counters were real but not the
+  critical path on the hybrid; the extra coordination costs of splitting
+  the k'-axis across blocks easily dominated the LDS wins.
+
+### 4×4×4 layout — CONFIRMED (overrides the "broadcast" hypothesis)
+
+From `test_mfma_4x4x4_layout{,2,3}.hip`:
+
+- The instruction is **4 INDEPENDENT 4×4×4 GEMMs**, not a 4-way
+  broadcast.  Lane decomposition `S = 16α + 4g + β` with
+  `β = S%4, g = (S/4)%4, α = S/16`.  `g` is the group id.
+- A (4×4): lane S holds `A_g[m=β][k=α]`  (col-major)
+- B (4×4): lane S holds `B_g[k=α][n=β]`  (row-major)
+- D (4×4): lane S holds `D_g[m=α][n=β]`  (row-major)
+
+Note α and β swap roles between input (A/B) and output (D) fragments —
+same oddity as the 16×16×4 layout.
+
+### Obvious next optimisations (not pursued here)
+
+- **Fit B in LDS** via multi-block-per-tensor (e.g. 2 blocks handling
+  10 k'-slabs each, atomic-add in pass 3).  LDS per block drops to
+  ~35 KB and every MFMA can use LDS B.
+- **Hybrid 16×16×4 main + 4×4×4 strip/corner** tile pattern.  Uses the
+  faster instruction on the bulk of the work.
+- **Pass-1/pass-2 register fusion** (as in the K=16 path).
 
 ---
 
