@@ -21,6 +21,7 @@
 #include "transform_level2.h"
 #include "transform_level3.h"
 #include "transform_blocked.h"
+#include "transform_blocked_rocwmma.h"
 #include "util.h"
 
 // ---------------------------------------------------------------------------
@@ -102,8 +103,11 @@ int main(int argc, char** argv)
         case 7:
             submit_transform_bench_blocked<double>(N, nblocks, K, d_A, d_B, d_C, d_workspace, stream);
             break;
+        case 8:
+            submit_transform_bench_blocked_rocwmma<double>(N, nblocks, K, d_A, d_B, d_C, d_workspace, stream);
+            break;
         default:
-            std::cerr << "Unknown level " << level << " (supported: 1, 2, 3, 7)\n";
+            std::cerr << "Unknown level " << level << " (supported: 1, 2, 3, 7, 8)\n";
             return 1;
     }
     SYNC_STREAM(stream);
