@@ -98,58 +98,48 @@ void transform_kernel_blocked_rocwmma(int nfuncs,
     }
     __syncthreads();
 
-    // --- Pass 1: temp1 = B^T · blk, via rocWMMA ---
-    // Load A_frag as B^T (col_major interpretation of B_lds).  Load B_frag as
-    // the slab blk = A[:, :, k'=s] at buf[s*WB + i*BK + j].
-    // Chain 4 mma_sync calls to contract the full K=16 dim.
+    // --- Pass 1 (SWAPPED operands): compute blk^T · B ---
+    // A_frag = blk^T: col_major load of the per-wave blk region.
+    // B_frag = B: row_major load.
+    // Output D[j][a] = temp1[a][j].  In the fragment, thread t's acc1.x[e] =
+    // temp1[t%16][(t/16) + 4e] = temp1[t%16][p*4 + t/16]  (commutative).
+    // That is EXACTLY the value pass 2's matrix_a fragment wants at iter p=e,
+    // so we can feed acc1 straight into pass 2 without any LDS round-trip.
     FragAcc acc1;
     rw::fill_fragment(acc1, 0.0);
     #pragma unroll
     for (int p = 0; p < NMFMA; ++p) {
-        FragAT a_frag;                   // interpreted as B^T
-        FragB  b_frag;                   // blk slice
-        rw::load_matrix_sync(a_frag, &B_lds[p * 4 * K],           K);   // col_major → B^T
-        rw::load_matrix_sync(b_frag, &buf[s * WB + p * 4 * BK],   BK);
+        FragAT a_frag;                   // col_major → blk^T
+        FragB  b_frag;                   // B
+        rw::load_matrix_sync(a_frag, &buf[s * WB + p * 4 * BK],   BK);
+        rw::load_matrix_sync(b_frag, &B_lds[p * 4 * K],           K);
         rw::mma_sync(acc1, a_frag, b_frag, acc1);
     }
-    // Store temp1 back to wave s's region.
-    rw::store_matrix_sync(&buf[s * WB], acc1, BK, rw::mem_row_major);
-    __syncthreads();
+    // No LDS writeback.  acc1.x[p] is pass 2's a_frag value at iter p.
 
-    // --- Pass 2: temp2 = temp1 · B ---
+    // --- Pass 2: temp2 = temp1 · B  (consumes acc1 directly) ---
     FragAcc acc2;
     rw::fill_fragment(acc2, 0.0);
     #pragma unroll
     for (int p = 0; p < NMFMA; ++p) {
-        FragA a_frag;                    // temp1 slice (rows a, K cols j)
-        FragB b_frag;                    // B slice   (K rows j, cols b)
-        rw::load_matrix_sync(a_frag, &buf[s * WB + p * 4],        BK);
-        rw::load_matrix_sync(b_frag, &B_lds[p * 4 * K],           K);
-        rw::mma_sync(acc2, a_frag, b_frag, acc2);
+        FragA a_frag_p;
+        // Populate matrix_a's per-lane element from acc1's p-th acc value.
+        a_frag_p.x[0] = acc1.x[p];
+        FragB b_frag;
+        rw::load_matrix_sync(b_frag, &B_lds[p * 4 * K], K);
+        rw::mma_sync(acc2, a_frag_p, b_frag, acc2);
     }
+    // acc2 holds pass 2 output (temp2) in the same per-lane layout as L7's
+    // acc2 — so acc2.x[e] IS the corner-turn stash for iter e.
 
-    // --- Corner turn: cross-wave LDS exchange (same as L7) ---
-    // Pass 2 output is held in acc2 (rocWMMA opaque).  Stage to LDS first.
-    rw::store_matrix_sync(&buf[s * WB], acc2, BK, rw::mem_row_major);
-    __syncthreads();  // writes visible before cross-wave reads
-
-    // Each lane reads its 4 values from its own region, barriers, then
-    // writes to the destination wave at (row=b, col=s=k').
-    T stash[ELEMS_PER_LANE];
+    // --- Corner turn: direct cross-wave write from acc2 (no stash read) ---
+    __syncthreads();  // all waves done with pass-1 reads from own region
     #pragma unroll
     for (int e = 0; e < ELEMS_PER_LANE; ++e) {
         int idx = t + e * 64;
         int a_ix = idx / K;
         int b_ix = idx % K;
-        stash[e] = buf[s * WB + a_ix * BK + b_ix];
-    }
-    __syncthreads();
-    #pragma unroll
-    for (int e = 0; e < ELEMS_PER_LANE; ++e) {
-        int idx = t + e * 64;
-        int a_ix = idx / K;
-        int b_ix = idx % K;
-        buf[a_ix * WB + b_ix * BK + s] = stash[e];
+        buf[a_ix * WB + b_ix * BK + s] = acc2.x[e];
     }
     __syncthreads();
 
